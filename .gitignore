@@ -1,0 +1,30 @@
+# Sistema y entorno
+.DS_Store
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Datos locales y artefactos generados
+data/raw/*
+!data/raw/.gitkeep
+data/interim/*
+!data/interim/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+models/*
+!models/.gitkeep
+reports/figures/*
+!reports/figures/.gitkeep
+
+# Credenciales y archivos pesados comunes
+*.key
+*.pem
+*.pt
+*.pth
+*.ckpt

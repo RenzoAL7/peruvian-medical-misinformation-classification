@@ -1,0 +1,20 @@
+# Configuración inicial. Cada experimento deberá derivar de este archivo.
+project:
+  name: recomendador-fuentes-confiables-nlp-xai
+  seed: 42
+
+data:
+  raw_workbook: data/raw/Dataset_FakeNewsEspanol2024.xlsx
+  master_sheet: DATASET ULIMA 1189
+  qrels_path: data/qrels/qrels.csv
+
+split:
+  train: 0.70
+  validation: 0.15
+  test: 0.15
+
+ranking:
+  top_k: [1, 3, 5, 10]
+
+evaluation:
+  metrics: [precision_at_k, recall_at_k, mrr, ndcg_at_k]
