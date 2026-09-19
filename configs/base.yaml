@@ -1,20 +1,42 @@
-# Configuración inicial. Cada experimento deberá derivar de este archivo.
+# Configuración base de Seminario 1. Los experimentos deben derivar de aquí.
 project:
   name: recomendador-fuentes-confiables-nlp-xai
+  stage: seminario_1
   seed: 42
 
 data:
   raw_workbook: data/raw/Dataset_FakeNewsEspanol2024.xlsx
   master_sheet: DATASET ULIMA 1189
+  claims_path: data/processed/claims.parquet
+  evidence_path: data/processed/evidence.parquet
   qrels_path: data/qrels/qrels.csv
+  triplets_path: data/qrels/triplets.csv
 
 split:
   train: 0.70
   validation: 0.15
   test: 0.15
+  group_by: evidence_url
 
 ranking:
   top_k: [1, 3, 5, 10]
+  methods:
+    - tfidf_cosine
+    - bm25
+    - sbert_pretrained
+    - sbert_triplet
 
 evaluation:
   metrics: [precision_at_k, recall_at_k, mrr, ndcg_at_k]
+
+sbert:
+  model_name: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  triplet_margin: 0.5
+  epochs: 1
+  batch_size: 2
+  run_real_model: false
+
+scope:
+  external_api: false
+  rag: false
+  generated_answer: false

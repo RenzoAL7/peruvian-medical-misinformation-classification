@@ -5,9 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "recomendador-fuentes-confiables-nlp-xai"
 version = "0.1.0"
-description = "Recomendación explicable de fuentes confiables en español mediante NLP."
+description = "Recuperación y ranking de evidencias confiables en español mediante NLP."
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "jupyterlab>=4.2",
+    "ipykernel>=6.29",
+    "nbconvert>=7.16",
+]
+
+[project.optional-dependencies]
+sbert = [
+    "sentence-transformers>=3.0",
+    "datasets>=3.0",
+    "accelerate>=0.26.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

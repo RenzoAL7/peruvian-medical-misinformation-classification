@@ -1,10 +1,17 @@
-# Datos
+# Organización de datos del núcleo
 
-Esta carpeta organiza los datos según su etapa de procesamiento.
+La adaptación del dataset es la parte principal pendiente de Seminario 1.
 
-- `raw/`: archivos recibidos sin modificación. No se suben a Git.
-- `interim/`: salidas temporales de auditoría y limpieza. No se suben a Git.
-- `processed/`: conjuntos listos para modelado. No se suben a Git mientras contengan datos derivados sujetos a permisos.
-- `qrels/`: especificación y futuros archivos con juicios de relevancia entre consultas y documentos candidatos.
+- `raw/`: archivo original sin modificaciones. No se sube a Git.
+- `interim/`: auditorías, normalización y resultados temporales. No se sube a Git.
+- `processed/`: `Claims` y `Evidence` preparados para recuperación. No se sube a Git mientras contenga datos derivados sujetos a permisos.
+- `qrels/`: juicios de relevancia y tripletas revisadas; su esquema está documentado en `data/qrels/README.md`.
 
-El archivo fuente debe conservarse con un nombre estable y anotarse en el diccionario de datos. No se deben combinar automáticamente las hojas auxiliares con la hoja maestra sin una revisión de solapamientos.
+El archivo fuente debe conservar su versión, fecha de obtención y hoja de origen.
+Para `FakeNewsEspañol2024`, la hoja maestra se revisa primero y no se combinan
+automáticamente hojas auxiliares.
+
+Las etiquetas `VERDADERO/FALSO` se conservan como metadatos del registro
+original. No se transforman automáticamente en relevancia de recuperación. La
+URL, la fuente y el texto de evidencia deben conservar su procedencia y estado
+de extracción.

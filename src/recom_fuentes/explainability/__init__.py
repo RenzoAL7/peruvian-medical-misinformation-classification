@@ -1,1 +1,0 @@
-"""Explicaciones de las recomendaciones."""
