@@ -1,8 +1,8 @@
 # Notebooks del núcleo
 
-Por ahora se mantiene un único notebook ejecutable. Los notebooks de auditoría,
-qrels y experimentos con datos reales se agregarán cuando el dataset adaptado
-esté definido.
+Los notebooks actuales son demostraciones acotadas del flujo de recuperación.
+Los notebooks de auditoría, qrels y experimentos completos con datos reales se
+agregarán cuando el dataset adaptado esté definido.
 
 ## Minisimulación local de Seminario 1
 
@@ -43,3 +43,16 @@ Para habilitar esa sección del notebook:
 
 Después selecciona el kernel `.venv/bin/python`, cambia `RUN_REAL_SBERT = True`
 en la sección comparativa y ejecuta nuevamente las celdas desde el inicio.
+
+## Prueba de integración con PubMed hasta Top-K
+
+El notebook `01_pubmed_topk_retrieval.ipynb` prueba una consulta real contra
+PubMed mediante ESearch y EFetch. Recupera los identificadores de los artículos,
+extrae título, resumen, autores, año y DOI, y ordena las evidencias mediante
+BM25. Incluye una sección opcional de SBERT para comparar embeddings cuando
+`sentence-transformers` esté instalado.
+
+Este notebook requiere conexión a internet durante la ejecución y se detiene en
+el ranking Top-K: no incluye RAG, generación de respuestas, clasificación de
+veracidad ni entrenamiento con Triplet Loss. La API utilizada corresponde a
+los servicios E-utilities de NCBI.
