@@ -3,24 +3,33 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "recomendador-fuentes-confiables-nlp-xai"
+name = "peruvian-medical-misinformation-classification"
 version = "0.1.0"
-description = "Recuperación y ranking de evidencias confiables en español mediante NLP."
+description = "Reproducible binary classification of Spanish medical misinformation related to Peru."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.26",
-    "pandas>=2.2",
-    "jupyterlab>=4.2",
-    "ipykernel>=6.29",
-    "nbconvert>=7.16",
+    "beautifulsoup4>=4.12",
+    "httpx>=0.27",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
-sbert = [
-    "sentence-transformers>=3.0",
+scraping = [
+    "trafilatura>=1.9",
+]
+training = [
+    "accelerate>=0.26",
     "datasets>=3.0",
-    "accelerate>=0.26.0",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scikit-learn>=1.5",
+    "sentence-transformers>=3.0",
+    "torch>=2.3",
+    "transformers>=4.45",
+]
+dev = [
+    "pytest>=8.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -17,6 +17,8 @@ data/raw/*
 !data/raw/.gitkeep
 data/interim/*
 !data/interim/.gitkeep
+data/annotations/*
+!data/annotations/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
 

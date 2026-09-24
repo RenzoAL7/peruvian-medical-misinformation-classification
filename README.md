@@ -1,103 +1,121 @@
-# Recomendador de fuentes confiables en español
+# Clasificación binaria de desinformación médica peruana
 
-Repositorio base de la tesis para **Seminario 1**. El núcleo actual recupera y
-ordena evidencias en español relacionadas con una consulta o afirmación. No
-clasifica automáticamente la verdad de una afirmación.
+Repositorio de Seminario 1 para construir y evaluar un clasificador binario de
+noticias médicas en español relacionadas con Perú.
 
-## Alcance actual
-
-El flujo de Seminario 1 termina en el ranking y la evaluación de evidencias:
+La unidad de predicción es el texto de la noticia y la única variable objetivo
+es:
 
 ```text
-Dataset original
-  → auditoría y preprocesamiento
-  → Claims + Evidence
-  → qrels de relevancia + tripletas
-  → recuperación con cuatro enfoques
-  → ranking por similitud o puntuación
-  → Precision@k, Recall@k, MRR y nDCG@k
+REAL | FAKE
 ```
 
-Los cuatro enfoques comparados son:
+El corpus se recopila inicialmente desde El Comercio, RPP Noticias y Latina
+Noticias. La evidencia científica se usa para justificar la etiqueta, no como
+una tercera clase ni como entrada del modelo.
 
-1. TF-IDF + similitud coseno.
-2. BM25.
-3. SBERT preentrenado + similitud coseno.
-4. SBERT ajustado con Triplet Loss + similitud coseno.
+## Alcance de Seminario 1
 
-TF-IDF y BM25 son baselines de recuperación. SBERT preentrenado genera
-embeddings con pesos existentes y Triplet Loss ajusta SBERT usando relaciones
-`consulta–positivo–negativo` revisadas.
+El flujo del repositorio es:
 
-La similitud indica relación textual o semántica; no demuestra que una noticia
-sea verdadera o falsa.
+```text
+URLs de fuentes permitidas
+  → extracción dirigida de noticias
+  → preservación de metadatos y procedencia
+  → limpieza y deduplicación
+  → identificación de la afirmación médica central
+  → verificación de la afirmación
+  → etiquetas REAL/FAKE
+  → división train/validation/test
+  → entrenamiento y comparación de clasificadores
+```
 
-## Qué queda fuera por ahora
+Los casos ambiguos, sin evidencia suficiente o imposibles de separar no se
+convierten en una tercera etiqueta: se excluyen del dataset final y se dejan
+registrados en la auditoría.
 
-- APIs externas y consulta de noticias en tiempo real.
-- RAG, LLM y generación de respuestas citadas.
-- Clasificación automática de veracidad.
-- Módulos de explicabilidad y agregación avanzada por fuente.
+Scopus se utiliza únicamente para localizar papers y documentar el estado del
+arte. PubMed y las fuentes sanitarias oficiales se utilizan como evidencia para
+la anotación. Ninguna de esas fuentes reemplaza el texto de la noticia que
+recibirá el clasificador.
 
-Estas piezas podrán incorporarse después de cerrar el corpus, los qrels y la
-evaluación de Seminario 1.
+## Recolección reproducible
 
-## Estructura mínima
+La recolección no rastrea indiscriminadamente dominios completos. Se trabaja
+con un manifiesto de URLs revisadas y una lista de dominios permitidos:
+
+```bash
+cp data/source_urls.example.csv data/raw/source_urls.csv
+
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[scraping]'
+
+.venv/bin/python scripts/01_collect_sources.py \
+  --config configs/sources.yaml \
+  --urls-file data/raw/source_urls.csv \
+  --output data/raw/articles.jsonl
+```
+
+El manifiesto local debe contener al menos `url` y `source_id`. Las páginas
+descargadas y los textos derivados quedan fuera de Git. Antes de recolectar se
+deben revisar los términos de uso, robots.txt, límites de consulta y permisos
+de cada fuente.
+
+Después se prepara la hoja de anotación:
+
+```bash
+.venv/bin/python scripts/02_prepare_annotation.py \
+  --input data/raw/articles.jsonl \
+  --output data/annotations/annotation_template.csv
+```
+
+Una vez completadas manualmente las etiquetas y la evidencia:
+
+```bash
+.venv/bin/python scripts/03_build_binary_dataset.py \
+  --input data/annotations/annotation_template.csv \
+  --output data/processed/medical_misinformation_binary.csv
+```
+
+## Estructura
 
 ```text
 .
-├── configs/base.yaml                    # parámetros reproducibles
+├── configs/
+│   ├── base.yaml                 # alcance, datos, splits y evaluación
+│   └── sources.yaml              # fuentes y dominios permitidos
 ├── data/
-│   ├── raw/                              # dataset original, no versionado
-│   ├── interim/                          # auditorías y transformaciones temporales
-│   ├── processed/                        # Claims y Evidence preparados
-│   └── qrels/                            # relevancia y tripletas revisadas
-├── docs/methodology.md                   # contrato metodológico de Seminario 1
-├── notebooks/00_minisimulacion_query_coseno.ipynb
-├── src/recom_fuentes/
-│   ├── data/                             # carga y preprocesamiento
-│   ├── ground_truth/                     # qrels y tripletas
-│   ├── retrieval/                        # cuatro enfoques de recuperación
-│   └── evaluation/                       # métricas de ranking
-└── tests/                                # pruebas del núcleo
+│   ├── raw/                      # URLs y capturas locales, no versionado
+│   ├── annotations/              # anotación y evidencia, no versionado
+│   ├── interim/                  # transformaciones temporales
+│   ├── processed/                # dataset binario final
+│   └── source_urls.example.csv   # plantilla versionada
+├── docs/methodology.md           # protocolo metodológico
+├── scripts/
+│   ├── 01_collect_sources.py     # extracción dirigida
+│   ├── 02_prepare_annotation.py  # plantilla de anotación
+│   └── 03_build_binary_dataset.py
+├── src/peruvian_medical_misinformation/
+│   └── collection.py             # descarga y extracción de texto
+└── tests/
 ```
 
-## Estado real
+## Modelo y evaluación
 
-La minisimulación del notebook funciona con un corpus sintético y demuestra el
-flujo completo. Sus métricas no son resultados finales de la tesis. El siguiente
-trabajo consiste en adaptar `FakeNewsEspañol2024` a un conjunto de claims,
-documentos de evidencia y juicios de relevancia revisados por personas.
+La comparación prevista es binaria y usa Macro-F1 como métrica principal,
+acompañada de precision, recall, ROC-AUC y matriz de confusión. Las familias de
+modelos se mantienen como experimentos de Seminario 1: TF-IDF con clasificadores
+clásicos, embeddings de palabras, sentence transformers y transformers en
+español. No se incluyen ranking, qrels, Triplet Loss, RAG, generación de
+respuestas ni clasificación multiclase.
 
-## Instalación
+El piloto inicial será de 200 registros para comprobar las reglas de anotación.
+La meta del corpus final es aproximadamente 1,000 registros válidos y
+balanceados entre `REAL` y `FAKE`.
 
-Desde la raíz del repositorio:
+## Datos y credenciales
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e .
-.venv/bin/python -m ipykernel install --user \
-  --name recomendador-fuentes-confiables \
-  --display-name "Python (recomendador-fuentes-confiables)"
-```
-
-Para ejecutar también SBERT real y Triplet Loss:
-
-```bash
-.venv/bin/python -m pip install -e '.[sbert]'
-```
-
-En VS Code se debe seleccionar `.venv/bin/python` como kernel del notebook.
-
-## Reglas de datos
-
-- Mantener el archivo original fuera de Git y sin modificaciones.
-- No convertir automáticamente `VERDADERO/FALSO` en juicios de relevancia.
-- No convertir automáticamente `LINK` en evidencia positiva.
-- Construir tripletas sólo con qrels de entrenamiento.
-- Separar entrenamiento, validación y prueba sin fuga por URL o documento.
-- Registrar procedencia, estado de extracción y límites de cada evidencia.
-
-Antes de publicar datos o contenido recuperado, revisar permisos, anonimización
-y condiciones de atribución.
+No se suben al repositorio textos descargados, claves de Scopus ni respuestas
+completas de APIs. Se conserva la procedencia mediante URL, fuente, fecha,
+estado de extracción y referencias de evidencia. El acceso a los artículos
+debe respetar los permisos de cada fuente.
