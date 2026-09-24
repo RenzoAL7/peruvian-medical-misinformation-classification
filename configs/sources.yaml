@@ -1,0 +1,35 @@
+# Fuentes habilitadas para la recolección dirigida.
+# Agregar una fuente exige revisar sus términos, robots.txt y permisos.
+sources:
+  el_comercio:
+    name: El Comercio
+    enabled: true
+    acquisition: url_manifest
+    allowed_domains:
+      - elcomercio.pe
+      - www.elcomercio.pe
+    notes: >-
+      Fuente principal de noticias. Ingresar URLs elegibles en el manifiesto;
+      no rastrear el dominio completo.
+
+  rpp:
+    name: RPP Noticias
+    enabled: true
+    acquisition: url_manifest
+    allowed_domains:
+      - rpp.pe
+      - www.rpp.pe
+    notes: >-
+      Priorizar publicaciones de salud y sociedad relacionadas con Perú;
+      ingresar URLs elegibles en el manifiesto.
+
+  latina:
+    name: Latina Noticias
+    enabled: true
+    acquisition: url_manifest
+    allowed_domains:
+      - latina.pe
+      - www.latina.pe
+    notes: >-
+      Usar noticias médicas publicadas en el portal de noticias; ingresar URLs
+      elegibles en el manifiesto.

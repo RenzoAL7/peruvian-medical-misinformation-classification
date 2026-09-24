@@ -1,87 +1,170 @@
-# Diseño metodológico de Seminario 1
+# Metodología de Seminario 1
 
-## 1. Propósito y límite
+## 1. Objetivo y alcance
 
-El sistema recibe una consulta o afirmación en español y recupera documentos de evidencia relacionados, ordenándolos según su relevancia. El resultado es una recomendación de evidencias y fuentes, no una sentencia automática de verdad o falsedad.
-
-Seminario 1 termina después de obtener y evaluar el ranking. Las APIs externas, la consulta en tiempo real, RAG y la generación de una respuesta citada quedan para una etapa posterior.
-
-## 2. Unidad de recuperación
-
-La unidad recuperada es un **documento de evidencia**: una verificación, nota, comunicado o publicación perteneciente al corpus definido. La interfaz podrá agrupar resultados por fuente o dominio después, pero la evaluación se realiza primero sobre documentos.
-
-## 3. Adaptación del dataset
-
-`FakeNewsEspañol2024` es el punto de partida, no el ground truth final del ranking. Sus etiquetas `VERDADERO` y `FALSO` describen el registro original, pero no indican si un documento es relevante para una consulta.
-
-El dataset adaptado debe conservar la trazabilidad y separar como mínimo:
-
-- `Claims`: identificador y texto de la afirmación o consulta.
-- `Evidence`: identificador, texto, URL, fuente, dominio y estado de extracción.
-- `Relevance_Judgments`: relación consulta–evidencia con relevancia `0`, `1` o `2`.
-- `Triplets`: consulta, evidencia positiva y evidencia negativa para entrenamiento.
-
-La anotación de relevancia debe revisarse manualmente. No se debe convertir automáticamente `LINK` en evidencia positiva, porque puede apuntar a un artículo de verificación y no a la fuente original. Las URLs duplicadas y las evidencias sin texto deben registrarse, no ocultarse.
-
-## 4. Flujo experimental
+El estudio construye y evalúa modelos para clasificar noticias médicas en
+español relacionadas con Perú. La tarea es estrictamente binaria:
 
 ```text
-Raw original
-  → auditoría y preservación
-  → limpieza, normalización y tokenización
-  → Claims + Evidence
-  → qrels de train/validation/test
-  → generación de tripletas desde train
-  → cuatro métodos de recuperación
-  → ranking de evidencias
-  → métricas y análisis de errores
+REAL: la afirmación médica central está respaldada por evidencia confiable.
+FAKE: la afirmación médica central es contradicha directamente por evidencia confiable.
 ```
 
-Las particiones deben evitar fuga de información por documento o URL. Las tripletas sólo pueden construirse con los juicios de relevancia de entrenamiento.
+No se implementan categorías temáticas, clasificación multiclase, ranking de
+fuentes, RAG, generación de respuestas, Triplet Loss ni recomendaciones de
+documentos. Esos componentes no forman parte de Seminario 1.
 
-## 5. Enfoques comparados
+## 2. Unidad de análisis y fuentes
 
-### 5.1 TF-IDF + similitud coseno
+La unidad de análisis es una noticia o publicación informativa que contiene una
+afirmación médica central verificable. La primera versión del corpus utilizará
+El Comercio, RPP Noticias y Latina Noticias como fuentes periodísticas peruanas
+aprobadas.
 
-Representa la consulta y los documentos mediante pesos léxicos. La similitud coseno ordena los documentos por coincidencia de términos. Es un baseline y no aprende parámetros mediante etiquetas de relevancia.
+El nombre del medio, la URL y la fecha son metadatos de procedencia. No son
+categorías del modelo y no determinan por sí solos la etiqueta. Una noticia
+publicada por un medio confiable no se marca automáticamente como `REAL`, y
+una noticia de un medio distinto no se marca automáticamente como `FAKE`.
 
-### 5.2 BM25
+## 3. Proceso de obtención del dataset
 
-Calcula una puntuación de recuperación léxica considerando frecuencia de términos, frecuencia documental y longitud del documento. Su puntuación no debe interpretarse como una similitud coseno.
+### 3.1 Registro de fuentes
 
-### 5.3 SBERT preentrenado
+Cada fuente se registra en `configs/sources.yaml` con un identificador, nombre,
+dominios permitidos y modalidad de adquisición. La extracción comienza con un
+manifiesto local de URLs (`data/raw/source_urls.csv`). Esto permite repetir la
+misma colección y revisar qué páginas fueron incluidas.
 
-Transforma la consulta y cada evidencia en embeddings semánticos usando pesos preentrenados. La similitud coseno permite ordenar textos relacionados incluso cuando no comparten exactamente las mismas palabras.
+No se rastrean dominios completos ni se evaden controles de acceso. Se usan
+URLs obtenidas mediante búsqueda dirigida, RSS, APIs públicas o selección
+manual, respetando términos de uso, robots.txt, límites de consulta y derechos
+de reproducción.
 
-### 5.4 SBERT ajustado con Triplet Loss
+### 3.2 Extracción dirigida
 
-Parte de SBERT y ajusta sus representaciones con tripletas revisadas:
+`scripts/01_collect_sources.py` valida que cada URL use HTTP(S) y pertenezca al
+dominio autorizado. Para cada página registra:
+
+- URL original y URL canónica cuando está disponible;
+- identificador estable derivado de la URL;
+- fuente y dominio;
+- fecha de descarga;
+- título y fecha de publicación detectados;
+- texto extraído;
+- método y estado de extracción;
+- código HTTP o mensaje de error.
+
+El resultado es un JSONL local. No se guarda HTML innecesario en el repositorio
+ni se versionan los textos descargados.
+
+### 3.3 Limpieza y control inicial
+
+Se eliminan elementos de navegación, scripts, publicidad y espacios repetidos.
+Se conservan el registro original y la versión limpia para poder auditar la
+transformación. Los registros sin texto suficiente pasan a revisión y no se
+incluyen automáticamente en el dataset final.
+
+Se eliminan duplicados por URL canónica y se revisan duplicados de contenido,
+noticias sindicadas y copias con cambios mínimos. El proceso no inventa texto
+cuando una página no puede extraerse: registra el fallo y conserva la URL para
+revisión manual.
+
+## 4. Anotación binaria
+
+### 4.1 Afirmación central
+
+Para cada noticia elegible se redacta o delimita una sola afirmación médica
+central. Si una noticia contiene varias afirmaciones que no pueden separarse sin
+cambiar su sentido, se excluye del conjunto final.
+
+### 4.2 Evidencia
+
+La afirmación se contrasta con PubMed y, cuando corresponde, con MINSA, INS,
+EsSalud, OMS/OPS, guías clínicas, revisiones sistemáticas, metaanálisis o
+consensos profesionales. Se registra la consulta, fecha, PMID o URL, tipo de
+fuente y una justificación breve.
+
+La evidencia respalda la decisión humana, pero no se entrega como característica
+al modelo. El modelo recibe el texto de la noticia y la etiqueta, no palabras
+como “falso”, el veredicto de un fact-checker ni la justificación de la
+anotación.
+
+### 4.3 Regla de etiqueta
+
+- `REAL`: la afirmación central está respaldada por la evidencia seleccionada.
+- `FAKE`: la evidencia seleccionada contradice directamente la afirmación.
+
+Los casos ambiguos, no verificables, sin evidencia suficiente o con afirmaciones
+múltiples se excluyen del dataset final. No se convierten en una tercera clase.
+
+El piloto de 200 registros permite revisar la claridad de estas reglas antes de
+escalar hacia un corpus aproximado de 1,000 registros, idealmente balanceado
+entre ambas etiquetas.
+
+## 5. Esquema de datos
+
+La hoja de anotación conserva la procedencia y la decisión:
 
 ```text
-(consulta, evidencia positiva, evidencia negativa)
+record_id
+url
+canonical_url
+source_name
+published_at
+retrieved_at
+title
+text
+claim_text
+label
+evidence_url
+evidence_type
+pmid
+pubmed_query
+query_date
+verdict_reason
+annotator_1
+annotator_2
+adjudication
+notes
 ```
 
-El objetivo es acercar la consulta a la evidencia positiva y alejarla de la negativa. El ajuste debe hacerse sólo con tripletas de entrenamiento; después se evalúa con consultas y evidencias no expuestas durante el ajuste.
+La variable usada para el entrenamiento es `label`, con valores únicamente
+`REAL` y `FAKE`. `source_name`, `evidence_url` y las demás columnas de auditoría
+no son clases ni deben incorporarse como características sin una justificación
+experimental explícita.
 
-## 6. Evaluación
+## 6. Preparación para el entrenamiento
 
-Cada método produce un ranking para las mismas consultas de prueba. Se calculan:
+Antes del split se eliminan duplicados, conflictos de etiqueta y registros sin
+texto. El texto de entrada se define de forma fija, por ejemplo como título más
+cuerpo limpio. Las particiones de entrenamiento, validación y prueba se
+realizan de forma estratificada y evitando que la misma URL, copia o evento
+noticioso aparezca en particiones distintas.
 
-- `Precision@k`: proporción de resultados relevantes dentro de los primeros `k`.
-- `Recall@k`: proporción de evidencias relevantes recuperadas en los primeros `k`.
-- `MRR`: posición de la primera evidencia relevante.
-- `nDCG@k`: calidad del orden considerando grados de relevancia.
+La evidencia y la decisión de los anotadores se conservan para auditoría, pero
+no se usan para crear una predicción privilegiada. Así se evita la fuga de
+información hacia el modelo.
 
-Se deben fijar los mismos valores de `k`, consultas y qrels para los cuatro métodos. También conviene registrar tiempo de respuesta y casos de error, pero no sustituir las métricas de ranking por accuracy o F1.
+## 7. Modelos y evaluación
 
-## 7. Criterio de cierre de Seminario 1
+Se comparan representaciones y clasificadores binarios:
 
-El núcleo estará listo cuando:
+- TF-IDF con regresión logística, SVM y Naive Bayes;
+- embeddings de palabras con modelos recurrentes;
+- sentence transformers con un clasificador binario;
+- transformers en español con una cabeza de clasificación.
 
-1. el dataset adaptado tenga trazabilidad y controles de calidad;
-2. los qrels y tripletas estén revisados y particionados sin fuga;
-3. los cuatro enfoques produzcan rankings reproducibles;
-4. las métricas se calculen sobre las mismas consultas de prueba;
-5. se documenten resultados, errores, limitaciones y diferencias entre métodos.
+La métrica principal es Macro-F1. También se reportan precision, recall,
+ROC-AUC, matriz de confusión y análisis descriptivo de errores.
 
-La minisimulación del notebook valida la mecánica del flujo, pero sus resultados no deben presentarse como evidencia experimental final porque utiliza un corpus sintético pequeño.
+## 8. Reproducibilidad y límites
+
+Cada ejecución debe conservar la versión del manifiesto, fecha de extracción,
+configuración, estado HTTP, versión del código y conteos antes y después de
+cada filtro. Las claves de API y los textos que no puedan redistribuirse no se
+suben a Git.
+
+Scopus se mantiene fuera de la construcción del dataset: se usa para buscar y
+documentar papers. PubMed y las fuentes sanitarias se usan para justificar las
+etiquetas. El resultado de Seminario 1 es un clasificador binario reproducible,
+no un sistema de recomendación ni un verificador automático autónomo.

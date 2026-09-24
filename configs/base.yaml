@@ -1,42 +1,63 @@
-# Configuración base de Seminario 1. Los experimentos deben derivar de aquí.
+# Configuración reproducible de Seminario 1.
 project:
-  name: recomendador-fuentes-confiables-nlp-xai
+  name: peruvian-medical-misinformation-classification
   stage: seminario_1
+  task: binary_text_classification
   seed: 42
+  labels: [REAL, FAKE]
+
+corpus:
+  language: es
+  country_context: PE
+  primary_source: el_comercio
+  approved_sources: [el_comercio, rpp, latina]
+  pilot_size: 200
+  target_size: 1000
+  target_per_label: 500
 
 data:
-  raw_workbook: data/raw/Dataset_FakeNewsEspanol2024.xlsx
-  master_sheet: DATASET ULIMA 1189
-  claims_path: data/processed/claims.parquet
-  evidence_path: data/processed/evidence.parquet
-  qrels_path: data/qrels/qrels.csv
-  triplets_path: data/qrels/triplets.csv
+  source_manifest: data/raw/source_urls.csv
+  collected_records: data/raw/articles.jsonl
+  annotation_template: data/annotations/annotation_template.csv
+  final_dataset: data/processed/medical_misinformation_binary.csv
+
+collection:
+  timeout_seconds: 30
+  max_urls_per_run: 0
+  user_agent: peruvian-medical-misinformation-research/0.1
+  require_allowlisted_domain: true
+
+annotation:
+  allowed_labels: [REAL, FAKE]
+  evidence_sources: [PubMed, MINSA, INS, EsSalud, OMS, OPS]
+  ambiguous_records: exclude_from_final_dataset
 
 split:
   train: 0.70
   validation: 0.15
   test: 0.15
-  group_by: evidence_url
+  stratify_by: label
+  group_by: canonical_url
 
-ranking:
-  top_k: [1, 3, 5, 10]
-  methods:
-    - tfidf_cosine
-    - bm25
-    - sbert_pretrained
-    - sbert_triplet
+models:
+  classical:
+    - tfidf_logistic_regression
+    - tfidf_svm
+    - tfidf_naive_bayes
+  embeddings:
+    - glove_bilstm
+    - word2vec_lstm
+    - sentence_transformer_logistic_regression
+  transformers:
+    - BETO
+    - RoBERTa
+    - DistilBERT
+    - DeBERTa
 
 evaluation:
-  metrics: [precision_at_k, recall_at_k, mrr, ndcg_at_k]
-
-sbert:
-  model_name: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-  triplet_margin: 0.5
-  epochs: 1
-  batch_size: 2
-  run_real_model: false
+  primary_metric: macro_f1
+  secondary_metrics: [precision, recall, roc_auc, confusion_matrix]
 
 scope:
-  external_api: false
-  rag: false
-  generated_answer: false
+  scopus: literature_search_only
+  pubmed: label_evidence_only
