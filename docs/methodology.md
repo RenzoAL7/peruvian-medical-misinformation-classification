@@ -183,8 +183,10 @@ después de verificar los archivos fuente correspondientes.
 
 Cada ejecución debe conservar la versión del manifiesto, fecha de extracción,
 configuración, estado HTTP, versión del código y conteos antes y después de
-cada filtro. Las claves de API y los textos que no puedan redistribuirse no se
-suben a Git.
+cada filtro. Las claves de API, HTML y artefactos intermedios no se suben a Git.
+El corpus CSV consolidado se versiona únicamente en el repositorio privado de
+los tesistas; no se usa Parquet en esta entrega ni se redistribuye el corpus
+fuera de ese ámbito sin revisar los permisos aplicables.
 
 Scopus se mantiene fuera de la construcción del dataset: se usa para buscar y
 documentar papers. PubMed y las fuentes sanitarias se usan para justificar las
