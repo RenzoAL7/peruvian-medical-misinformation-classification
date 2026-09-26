@@ -28,6 +28,7 @@ data/annotations/*
 data/processed/*
 !data/processed/.gitkeep
 !data/processed/medical_news_corpus_2026.csv
+!data/processed/medical_news_professor_style_2026.csv
 reports/*
 !reports/.gitkeep
 

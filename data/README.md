@@ -12,6 +12,10 @@ de extracción, hashes, rutas de HTML y campos vacíos para revisión humana. Se
 versiona únicamente en este repositorio privado del equipo. No existe una
 versión Parquet.
 
+`medical_news_professor_style_2026.csv` es una vista derivada del mismo corpus
+con las 12 columnas de la hoja del profesor. Sirve para revisión manual y no
+reemplaza el CSV trazable; `CATEGORY` se mantiene vacío hasta la anotación.
+
 ```text
 data/
 ├── raw/          # HTML original y manifiestos locales; ignorados por Git

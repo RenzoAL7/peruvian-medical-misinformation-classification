@@ -53,6 +53,16 @@ el trabajo de los tesistas. Conserva texto, procedencia y campos de revisión
 humanos sin etiquetas automáticas; no se distribuyen HTML, logs ni credenciales.
 No se utiliza Parquet en esta entrega.
 
+Para trabajar con una estructura equivalente a la hoja del profesor, ejecuta:
+
+```bash
+.venv/bin/python scripts/05_export_professor_style_csv.py
+```
+
+Esto genera [medical_news_professor_style_2026.csv](data/processed/medical_news_professor_style_2026.csv)
+con sus 12 columnas prácticas. `CATEGORY` queda vacío hasta la verificación
+humana; no se copian ni infieren etiquetas históricas.
+
 Consulta [el esquema de datos](docs/data_schema.md) para los campos obligatorios.
 
 ## Alcance metodológico
@@ -98,6 +108,7 @@ scripts/01_discover_urls.py
 scripts/02_collect_articles.py
 scripts/03_consolidate_corpus.py
 scripts/04_prepare_annotation.py
+scripts/05_export_professor_style_csv.py
 src/peruvian_medical_misinformation/corpus.py
 src/peruvian_medical_misinformation/spiders.py
 tests/

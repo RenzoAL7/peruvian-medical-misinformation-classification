@@ -46,6 +46,25 @@ Además de los campos del corpus, contiene:
 Los registros duplicados o no válidos se preservan en el corpus y no pasan por
 defecto a la plantilla de anotación.
 
+## Vista CSV con columnas del profesor
+
+`data/processed/medical_news_professor_style_2026.csv` es una vista derivada
+para trabajar en una hoja simple. Tiene una fila por noticia y estas columnas:
+
+| Columna | Origen o regla |
+| --- | --- |
+| `ID` | `record_id` del corpus trazable. |
+| `CATEGORY` | Vacío hasta la revisión humana; nunca se infiere desde la fuente. |
+| `TOPICS` | `Salud`. |
+| `SOURCE`, `Tipo de Fuente` | Medio de origen y `Medio de comunicación`. |
+| `HEADLINE` | Título extraído. |
+| `TEXT` | Bajada y cuerpo, conservando saltos de párrafo. |
+| `LINK`, `Certificado de seguridad` | URL original y `Sí` cuando usa HTTPS. |
+| `Fecha`, `Hora`, `Autor` | Fecha/hora de publicación y autor cuando se extrajeron. |
+
+El CSV trazable sigue siendo la fuente de verdad para URL canónica, HTML,
+hashes, estado de extracción, duplicados y revisión de evidencia.
+
 ## Resumen de la corrida
 
 `reports/collection_summary.json` informa los conteos por `source_dataset`, los
