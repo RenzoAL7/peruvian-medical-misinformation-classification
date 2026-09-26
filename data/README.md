@@ -1,24 +1,32 @@
 # Organización de datos
 
-El dataset de entrenamiento se construye a partir de noticias médicas en
-español recolectadas desde El Comercio, RPP Noticias y Latina Noticias.
+El corpus reúne noticias médicas en español de El Comercio, RPP Noticias y
+Latina Noticias. El archivo compartido para la tesis es:
+
+```text
+data/processed/medical_news_corpus_2026.csv
+```
+
+Contiene 154 registros con título, bajada, cuerpo, URL, fecha, fuente, estado
+de extracción, hashes, rutas de HTML y campos vacíos para revisión humana. Se
+versiona únicamente en este repositorio privado del equipo. No existe una
+versión Parquet.
 
 ```text
 data/
-├── raw/          # manifiesto local y noticias extraídas; no versionado
-├── annotations/  # etiquetas y evidencia; no versionado
-├── interim/      # auditorías y transformaciones temporales
-├── processed/    # dataset binario final para el entrenamiento
+├── raw/          # HTML original y manifiestos locales; ignorados por Git
+├── interim/      # JSONL y logs de extracción; ignorados por Git
+├── annotations/  # copias de trabajo para revisión humana; ignoradas por Git
+├── processed/    # corpus CSV privado y, luego, dataset binario etiquetado
 └── source_urls.example.csv
 ```
 
-El archivo original de cada fuente no se modifica. Los registros descargados y
-los textos derivados permanecen en rutas ignoradas por Git. La plantilla de
-URLs sí se versiona, pero no debe incluir claves, cookies ni contenido privado.
+Las etiquetas finales serán `0` (no desinformación) o `1` (desinformación).
+`EXCLUIDA` se utiliza en la revisión para afirmaciones ambiguas, contradictorias
+o no verificables, y no entra al conjunto de entrenamiento. La fuente no decide
+la etiqueta.
 
-La etiqueta final solo puede ser `REAL` o `FAKE`. Los casos ambiguos no entran
-al dataset final y deben quedar explicados en la anotación o auditoría.
-
-El texto de la noticia es la entrada del modelo. Las referencias de PubMed,
-fuentes oficiales, URLs y notas de los anotadores se conservan para justificar
-la etiqueta, no para filtrar la predicción durante el entrenamiento.
+El texto de entrada previsto es `title + subtitle_or_bajada + body`. Las URLs,
+fuentes, fechas, evidencia y notas de revisión son metadatos de trazabilidad,
+no características del modelo. No se entrena hasta completar la revisión humana
+y la deduplicación.

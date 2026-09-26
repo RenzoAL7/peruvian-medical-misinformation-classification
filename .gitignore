@@ -21,6 +21,7 @@ data/annotations/*
 !data/annotations/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+!data/processed/medical_news_corpus_2026.csv
 
 # Credenciales y archivos pesados comunes
 *.key

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Construye el dataset final aceptando únicamente REAL y FAKE."""
+"""Construye el dataset final aceptando únicamente las etiquetas 0 y 1."""
 
 from __future__ import annotations
 
@@ -19,18 +19,16 @@ OUTPUT_FIELDS = [
     "source_name",
     "published_at",
     "retrieved_at",
-    "claim_text",
+    "main_medical_claim",
+    "label_reason",
     "evidence_url",
-    "evidence_type",
-    "pmid",
-    "pubmed_query",
-    "query_date",
-    "verdict_reason",
-    "annotator_1",
-    "annotator_2",
-    "adjudication",
+    "evidence_source",
+    "evidence_identifier",
+    "reviewer_1",
+    "reviewer_2",
+    "reviewed_at",
 ]
-ALLOWED_LABELS = {"REAL", "FAKE"}
+ALLOWED_LABELS = {"0", "1"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,7 +51,7 @@ def main() -> int:
     excluded = 0
     with input_path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        required = {"record_id", "title", "text", "label"}
+        required = {"record_id", "title", "label"}
         missing = required - set(reader.fieldnames or [])
         if missing:
             raise SystemExit(f"Faltan columnas obligatorias: {sorted(missing)}")
@@ -65,13 +63,26 @@ def main() -> int:
             if label not in ALLOWED_LABELS:
                 raise SystemExit(
                     f"Etiqueta no permitida para {row.get('record_id', '')}: {label}. "
-                    "El dataset solo acepta REAL o FAKE."
+                    "El dataset solo acepta 0 o 1."
                 )
             record_id = (row.get("record_id") or "").strip()
+            body = (row.get("body") or row.get("text") or "").strip()
             text = "\n\n".join(
-                part.strip() for part in (row.get("title", ""), row.get("text", "")) if part.strip()
+                part.strip()
+                for part in (
+                    row.get("title", ""),
+                    row.get("subtitle_or_bajada", ""),
+                    body,
+                )
+                if part.strip()
             )
-            if not record_id or not text:
+            if (row.get("training_eligibility") or "").strip() not in {
+                "",
+                "requires_human_review",
+            }:
+                excluded += 1
+                continue
+            if not record_id or not body or not text:
                 excluded += 1
                 continue
             previous_label = seen.get(record_id)

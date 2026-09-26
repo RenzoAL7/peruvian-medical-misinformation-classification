@@ -30,6 +30,9 @@ sources:
     allowed_domains:
       - latina.pe
       - www.latina.pe
+      - latinanoticias.pe
+      - www.latinanoticias.pe
     notes: >-
-      Usar noticias médicas publicadas en el portal de noticias; ingresar URLs
-      elegibles en el manifiesto.
+      Usar noticias médicas publicadas en el portal de noticias; Latina.pe puede
+      redirigir al portal oficial latinanoticias.pe. Ingresar URLs elegibles en
+      el manifiesto.

@@ -4,7 +4,8 @@ project:
   stage: seminario_1
   task: binary_text_classification
   seed: 42
-  labels: [REAL, FAKE]
+  labels: [0, 1]
+  excluded_label: EXCLUIDA
 
 corpus:
   language: es
@@ -16,19 +17,25 @@ corpus:
   target_per_label: 500
 
 data:
-  source_manifest: data/raw/source_urls.csv
-  collected_records: data/raw/articles.jsonl
+  source_manifest: data/raw/source_urls_candidates_pending_period.csv
+  collected_records: data/interim/scraped_news.jsonl
+  raw_html_dir: data/raw/html
+  extraction_log: data/interim/extraction_log.csv
   annotation_template: data/annotations/annotation_template.csv
   final_dataset: data/processed/medical_misinformation_binary.csv
 
 collection:
+  start_date: 2026-01-01
+  end_date: 2026-09-26
   timeout_seconds: 30
+  delay_seconds: 1.0
+  max_retries: 2
   max_urls_per_run: 0
   user_agent: peruvian-medical-misinformation-research/0.1
   require_allowlisted_domain: true
 
 annotation:
-  allowed_labels: [REAL, FAKE]
+  allowed_labels: [0, 1, EXCLUIDA]
   evidence_sources: [PubMed, MINSA, INS, EsSalud, OMS, OPS]
   ambiguous_records: exclude_from_final_dataset
 
@@ -41,18 +48,16 @@ split:
 
 models:
   classical:
-    - tfidf_logistic_regression
-    - tfidf_svm
     - tfidf_naive_bayes
+    - tfidf_logistic_regression
+    - tfidf_linear_svm
   embeddings:
     - glove_bilstm
     - word2vec_lstm
-    - sentence_transformer_logistic_regression
   transformers:
-    - BETO
-    - RoBERTa
-    - DistilBERT
-    - DeBERTa
+    - bert_binary_head
+    - beto_binary_head
+    - roberta_bne_binary_head
 
 evaluation:
   primary_metric: macro_f1

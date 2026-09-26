@@ -28,8 +28,8 @@ def test_binary_builder_outputs_only_labeled_binary_rows(tmp_path):
     with input_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        writer.writerow({"record_id": "r1", "title": "Título 1", "text": "Texto 1", "label": "REAL"})
-        writer.writerow({"record_id": "r2", "title": "Título 2", "text": "Texto 2", "label": "FAKE"})
+        writer.writerow({"record_id": "r1", "title": "Título 1", "text": "Texto 1", "label": "0"})
+        writer.writerow({"record_id": "r2", "title": "Título 2", "text": "Texto 2", "label": "1"})
         writer.writerow({"record_id": "r3", "title": "Sin etiqueta", "text": "Texto 3", "label": ""})
 
     result = run_script(
@@ -43,7 +43,7 @@ def test_binary_builder_outputs_only_labeled_binary_rows(tmp_path):
     assert result.returncode == 0, result.stderr
     with output_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert [row["label"] for row in rows] == ["REAL", "FAKE"]
+    assert [row["label"] for row in rows] == ["0", "1"]
     assert rows[0]["text"] == "Título 1\n\nTexto 1"
 
 
@@ -64,4 +64,4 @@ def test_binary_builder_rejects_a_third_label(tmp_path):
     )
 
     assert result.returncode != 0
-    assert "solo acepta REAL o FAKE" in result.stderr
+    assert "solo acepta 0 o 1" in result.stderr

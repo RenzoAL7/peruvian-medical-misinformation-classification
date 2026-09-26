@@ -1,6 +1,8 @@
 from peruvian_medical_misinformation.collection import (
     canonicalize_url,
     collect_url,
+    extract_metadata,
+    find_exact_duplicates,
     is_allowed_domain,
 )
 
@@ -72,3 +74,35 @@ def test_collect_url_rejects_external_redirect():
         allowed_domains=["elcomercio.pe"],
     )
     assert record["content_status"] == "redirect_not_allowed"
+
+
+def test_extract_metadata_reads_jsonld_graph():
+    metadata = extract_metadata(
+        """
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@graph":[{
+          "@type":"NewsArticle", "headline":"Titular", "description":"Bajada",
+          "datePublished":"2026-09-26T08:00:00-05:00",
+          "author":{"@type":"Person","name":"Autora"}, "articleSection":"Salud"
+        }]}
+        </script>
+        """
+    )
+    assert metadata == {
+        "title": "Titular",
+        "published_at": "2026-09-26T08:00:00-05:00",
+        "subtitle_or_bajada": "Bajada",
+        "author": "Autora",
+        "section": "Salud",
+    }
+
+
+def test_find_exact_duplicates_keeps_the_first_record():
+    duplicates = find_exact_duplicates(
+        [
+            {"record_id": "first", "content_hash": "same", "body": "texto"},
+            {"record_id": "second", "content_hash": "same", "body": "texto"},
+            {"record_id": "third", "content_hash": "other", "body": "otro"},
+        ]
+    )
+    assert duplicates == {"second": "first"}
