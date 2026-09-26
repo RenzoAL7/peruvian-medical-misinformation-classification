@@ -23,7 +23,7 @@ data:
   raw_html_dir: data/raw/html
   raw_metadata_dir: data/raw/metadata
   corpus_csv: data/processed/medical_news_corpus.csv
-  corpus_parquet: data/processed/medical_news_corpus.parquet
+  private_corpus_csv: data/processed/medical_news_corpus_2026.csv
   annotation_template: data/annotations/annotation_template.csv
   collection_summary: reports/collection_summary.json
 

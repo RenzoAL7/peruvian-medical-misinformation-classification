@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Consolida fuentes existentes y scrapeadas en CSV, Parquet y un resumen auditable."""
+"""Consolida fuentes existentes y scrapeadas en CSV y un resumen auditable."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--edwin-records", default="data/raw/metadata/edwin_157.jsonl")
     parser.add_argument("--scraped-records", default="data/interim/scraped_news.jsonl")
     parser.add_argument("--csv-output", default="")
-    parser.add_argument("--parquet-output", default="")
     parser.add_argument("--log-output", default="")
     parser.add_argument("--summary-output", default="")
     parser.add_argument("--require-minimum", action="store_true")
@@ -43,8 +42,7 @@ def main() -> int:
         near_duplicate_threshold=float(config.get("collection", {}).get("near_duplicate_threshold", 0.92)),
     )
     csv_output = args.csv_output or data_config["corpus_csv"]
-    parquet_output = args.parquet_output or data_config["corpus_parquet"]
-    write_corpus(consolidated, csv_path=csv_output, parquet_path=parquet_output)
+    write_corpus(consolidated, csv_path=csv_output)
     log_output = args.log_output or data_config["extraction_log"]
     write_extraction_log(log_output, consolidated)
     summary = collection_summary(
@@ -53,7 +51,6 @@ def main() -> int:
     )
     write_summary(args.summary_output or data_config["collection_summary"], summary)
     print(f"CSV: {csv_output}")
-    print(f"Parquet: {parquet_output}")
     print(f"Log consolidado: {log_output}")
     print(f"Resumen: {args.summary_output or data_config['collection_summary']}")
     print(summary)

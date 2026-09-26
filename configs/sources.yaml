@@ -56,18 +56,20 @@ sources:
     allowed_domains:
       - latina.pe
       - www.latina.pe
+      - latinanoticias.pe
+      - www.latinanoticias.pe
     discovery:
       entrypoints:
         - kind: sitemap
           url: https://www.latina.pe/sitemap.xml
           assume_health_section: false
     compliance:
-      robots_url: https://www.latina.pe/robots.txt
-      terms_url: https://www.latina.pe/terminos-y-condiciones/
+        robots_url: https://www.latina.pe/robots.txt
+        terms_url: https://www.latina.pe/terminos-y-condiciones/
       robots_reviewed_at: 2026-09-26
       terms_reviewed_at: 2026-09-26
       scrapy_allowed: false
       notes: >-
-        robots.txt permite el rastreo general, pero los términos públicos
+        Latina.pe puede redirigir a latinanoticias.pe. Los términos públicos
         restringen la extracción y reutilización de contenidos. No activar sin
         autorización que cubra la recopilación académica propuesta.

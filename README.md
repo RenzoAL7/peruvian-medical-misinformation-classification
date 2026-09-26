@@ -28,7 +28,7 @@ python3 -m venv .venv
 .venv/bin/python scripts/01_discover_urls.py
 .venv/bin/python scripts/02_collect_articles.py
 
-# 4. Consolida CSV, Parquet y resumen. Exige al menos 200 registros únicos válidos.
+# 4. Consolida CSV y resumen. Exige al menos 200 registros únicos válidos.
 .venv/bin/python scripts/03_consolidate_corpus.py --require-minimum
 
 # 5. Genera la plantilla Human-in-the-Loop cuando se alcance el mínimo.
@@ -42,14 +42,22 @@ buscador: trabaja con categoría, RSS, sitemap o archivo público configurado.
 
 El mínimo antes de la anotación completa es **200 noticias válidas y no
 duplicadas**. Los resultados se escriben en
-`data/processed/medical_news_corpus.csv`,
-`data/processed/medical_news_corpus.parquet` y
+`data/processed/medical_news_corpus.csv` y
 `reports/collection_summary.json`. El resumen desglosa registros por fuente,
 válidos únicos, duplicados, errores, exclusiones y campos faltantes.
 
 La etiqueta de revisión humana es `0`, `1` o `EXCLUIDA`. La etiqueta original
 de Edwin se mantiene en `source_original_label`; no se traduce automáticamente
 porque su equivalencia debe validarse con evidencia médica.
+
+## Corpus privado actual
+
+El archivo [medical_news_corpus_2026.csv](data/processed/medical_news_corpus_2026.csv)
+contiene las 154 URLs procesadas en la primera recolección (50 El Comercio, 50
+RPP y 54 Latina). Está versionado únicamente en este repositorio privado para
+el trabajo de los tesistas. Conserva texto, procedencia y campos de revisión
+humanos sin etiquetas automáticas; no se distribuyen HTML, logs ni credenciales.
+No se utiliza Parquet en esta entrega.
 
 Consulta [el esquema de datos](docs/data_schema.md) para los campos obligatorios.
 
@@ -60,7 +68,7 @@ datos existentes + URLs públicas permitidas
   → preservación de HTML, URL, fecha y procedencia
   → extracción y normalización de texto
   → hashes y deduplicación
-  → corpus CSV/Parquet + informe de cobertura
+  → corpus CSV + informe de cobertura
   → plantilla Human-in-the-Loop
   → revisión de evidencia y etiqueta 0/1/EXCLUIDA
   → división estratificada posterior (70/15/15)
@@ -89,7 +97,7 @@ configs/                       # período, límites y fuentes aprobadas
 data/raw/html/                 # HTML original versionado, ignorado por Git
 data/raw/metadata/             # metadatos por fuente o corrida, ignorados
 data/interim/                  # URLs descubiertas, JSONL y log de extracción
-data/processed/                # CSV y Parquet consolidados, ignorados
+data/processed/                # CSV consolidado; solo el corpus privado se versiona
 data/annotations/              # plantilla de revisión humana, ignorada
 docs/data_schema.md            # diccionario de datos
 scripts/00_import_edwin_157.py
@@ -104,9 +112,9 @@ tests/
 
 ## Datos y referencias
 
-No se suben al repositorio textos descargados, HTML, claves, cookies ni
-credenciales. El código conserva los metadatos necesarios para reproducir y
-auditar la recolección local.
+No se suben HTML, claves, cookies ni credenciales. El corpus CSV consolidado se
+versiona únicamente en el repositorio privado del equipo; el código conserva
+los metadatos necesarios para reproducir y auditar la recolección local.
 
 ## Relación con antecedentes
 

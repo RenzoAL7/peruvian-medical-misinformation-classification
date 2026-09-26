@@ -133,15 +133,11 @@ def write_corpus(
     records: Iterable[dict[str, Any]],
     *,
     csv_path: str | Path,
-    parquet_path: str | Path,
 ) -> None:
     table = pd.DataFrame(list(records), columns=CORPUS_FIELDS)
     csv_destination = Path(csv_path)
-    parquet_destination = Path(parquet_path)
     csv_destination.parent.mkdir(parents=True, exist_ok=True)
-    parquet_destination.parent.mkdir(parents=True, exist_ok=True)
     table.to_csv(csv_destination, index=False, encoding="utf-8")
-    table.to_parquet(parquet_destination, index=False, engine="pyarrow")
 
 
 def annotation_rows(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
