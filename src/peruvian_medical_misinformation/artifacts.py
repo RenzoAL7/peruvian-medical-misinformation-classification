@@ -190,16 +190,6 @@ def collection_summary(records: Iterable[dict[str, Any]], *, minimum_records: in
         field: sum(not str(row.get(field) or "").strip() for row in rows)
         for field in SUMMARY_MISSINGNESS_FIELDS
     }
-    original_label_counts: dict[str, dict[str, int]] = {}
-    for source_dataset in sorted(by_source):
-        labels = Counter(
-            str(row.get("source_original_label") or "").strip()
-            for row in rows
-            if str(row.get("source_dataset") or "sin_fuente") == source_dataset
-            and str(row.get("source_original_label") or "").strip()
-        )
-        if labels:
-            original_label_counts[source_dataset] = dict(sorted(labels.items()))
     return {
         "records_total": len(rows),
         "records_valid_unique": valid_unique,
@@ -213,8 +203,6 @@ def collection_summary(records: Iterable[dict[str, Any]], *, minimum_records: in
         "errors": sum(row.get("extraction_status") == "error" for row in rows),
         "excluded": sum(row.get("extraction_status") == "excluded" for row in rows),
         "missing_field_counts": missing_field_counts,
-        "source_original_label_counts": original_label_counts,
-        "label_semantics_status": "unmapped_pending_human_evidence_review",
     }
 
 

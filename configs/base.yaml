@@ -9,14 +9,12 @@ project:
 corpus:
   language: es
   country_context: PE
-  components: [edwin_157, scraped_rpp, scraped_el_comercio, scraped_latina]
+  components: [scraped_rpp, scraped_el_comercio, scraped_latina]
   minimum_records_before_annotation: 200
   text_for_model: title + subtitle_or_bajada + body
   labels_are_human_review_only: true
 
 data:
-  edwin_input: data/raw/edwin_157.xlsx
-  edwin_sheet: DATASET ULIMA 1189
   discovered_urls: data/interim/discovered_urls.csv
   collected_records: data/interim/scraped_news.jsonl
   extraction_log: data/interim/extraction_log.csv

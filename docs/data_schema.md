@@ -11,15 +11,15 @@ solo metadatos.
 
 | Campo | Descripción |
 | --- | --- |
-| `record_id` | Identificador estable derivado de URL canónica o fila fuente. |
-| `source_dataset` | `edwin_157`, `scraped_rpp`, `scraped_el_comercio` o `scraped_latina`. |
+| `record_id` | Identificador estable derivado de la URL canónica. |
+| `source_dataset` | `scraped_rpp`, `scraped_el_comercio` o `scraped_latina`. |
 | `source_name` | Medio o fuente original. |
 | `url`, `canonical_url` | URL recibida y URL sin parámetros de seguimiento. |
 | `retrieved_at`, `published_at` | Recuperación UTC y fecha de publicación normalizada cuando existe. |
 | `title`, `subtitle_or_bajada`, `body` | Texto extraído, sin usarlo para etiquetar automáticamente. |
 | `author`, `section`, `language` | Metadatos de autoría, sección e idioma detectado. |
 | `http_status` | Código HTTP observado durante la descarga. |
-| `scraping_method` | `trafilatura`, `beautifulsoup_fallback` o `provided_dataset`. |
+| `scraping_method` | `trafilatura` o `beautifulsoup_fallback`. |
 | `raw_html_path` | Ruta local a una versión de la captura HTML original. |
 | `content_hash`, `normalized_content_hash` | SHA-256 del texto original y normalizado. |
 | `normalized_text` | Texto NFKC con espacios normalizados y tildes/negaciones conservadas. |
@@ -27,8 +27,7 @@ solo metadatos.
 | `exclusion_reason` | Motivo verificable de exclusión, revisión o error. |
 | `duplicate_status` | `unique`, `exact_url`, `exact_content` o `near_duplicate`. |
 | `duplicate_of_record_id`, `duplicate_similarity` | Registro de referencia y similitud cuando corresponde. |
-| `source_original_label` | Etiqueta heredada; no equivale por sí sola a una etiqueta médica nueva. |
-| `source_row_id`, `run_id` | Fila de origen y corrida reproducible. |
+| `run_id` | Identificador de la corrida de descubrimiento o extracción. |
 
 ## Plantilla de anotación Human-in-the-Loop
 
@@ -51,11 +50,5 @@ defecto a la plantilla de anotación.
 
 `reports/collection_summary.json` informa los conteos por `source_dataset`, los
 registros válidos únicos, estados de duplicación, errores, exclusiones y la
-cantidad de valores faltantes por campo trazable. Así las ausencias de metadatos
-del dataset entregado y las ausencias causadas por una extracción se distinguen
-sin inventar valores.
-
-También preserva los conteos de `source_original_label` sin convertirlos a
-`0` o `1`, junto con el estado `unmapped_pending_human_evidence_review`. Esto
-evita asumir que una etiqueta histórica tiene el mismo significado que el
-protocolo médico del proyecto.
+cantidad de valores faltantes por campo trazable. Así las ausencias causadas por
+una extracción se registran sin inventar valores.

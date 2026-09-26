@@ -20,26 +20,15 @@ entrenamiento de clasificadores.
 
 ## 2. Unidad de análisis y fuentes
 
-La unidad de análisis es una noticia o publicación informativa que contiene una
-afirmación médica central verificable. El corpus integra dos componentes:
-
-1. Las filas `TOPICS=Salud` del archivo entregado por el profesor, conservadas
-   como `edwin_157` y con `CATEGORY` en `source_original_label`.
-2. Noticias públicas de El Comercio, RPP Noticias y Latina, recolectadas como
-   `scraped_el_comercio`, `scraped_rpp` y `scraped_latina`.
+La unidad de análisis es una noticia o publicación informativa pública que
+contiene una afirmación médica central verificable. El corpus se compone de
+noticias de El Comercio, RPP Noticias y Latina, recolectadas como
+`scraped_el_comercio`, `scraped_rpp` y `scraped_latina`.
 
 El nombre del medio, la URL y la fecha son metadatos de procedencia. No son
 categorías del modelo y no determinan por sí solos la etiqueta. Una noticia
 publicada por un medio confiable no se marca automáticamente como `0`, y una
-noticia de un medio distinto no se marca automáticamente como `1`. La etiqueta
-histórica `REAL/FAKE`, `VERDADERO/FALSO` o similar tampoco se convierte de forma
-automática: se revisa su significado o se vuelve a verificar.
-
-`edwin_157` es un identificador de procedencia solicitado, no una garantía de
-que cualquier archivo recibido tenga exactamente 157 filas de Salud. Cada
-importación informa su conteo y conserva `source_row_id`; una discrepancia debe
-aclararse con quien entregó la base antes de equiparar etiquetas o publicar
-estadísticas finales.
+noticia de un medio distinto no se marca automáticamente como `1`.
 
 ## 3. Proceso de obtención del dataset
 

@@ -154,18 +154,15 @@ def test_source_marked_not_permitted_blocks_scrapy_execution():
 
 def test_summary_reports_deficit_against_minimum():
     record = {
-        "source_dataset": "edwin_157",
-        "source_original_label": "VERDADERO",
+        "source_dataset": "scraped_rpp",
         "extraction_status": "valid",
         "duplicate_status": "unique",
     }
     summary = collection_summary([record], minimum_records=200)
     assert summary["minimum_reached"] is False
     assert summary["records_missing_to_minimum"] == 199
-    assert summary["valid_unique_by_source_dataset"] == {"edwin_157": 1}
+    assert summary["valid_unique_by_source_dataset"] == {"scraped_rpp": 1}
     assert summary["missing_field_counts"]["title"] == 1
-    assert summary["source_original_label_counts"] == {"edwin_157": {"VERDADERO": 1}}
-    assert summary["label_semantics_status"] == "unmapped_pending_human_evidence_review"
 
 
 def test_scrapy_settings_obey_robots_and_limit_domain_concurrency():

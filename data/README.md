@@ -17,8 +17,7 @@ data/
 ├── raw/          # HTML original y manifiestos locales; ignorados por Git
 ├── interim/      # JSONL y logs de extracción; ignorados por Git
 ├── annotations/  # copias de trabajo para revisión humana; ignoradas por Git
-├── processed/    # corpus CSV privado y, luego, dataset binario etiquetado
-└── source_urls.example.csv
+└── processed/    # corpus CSV privado y, luego, dataset binario etiquetado
 ```
 
 Las etiquetas finales serán `0` (no desinformación) o `1` (desinformación).

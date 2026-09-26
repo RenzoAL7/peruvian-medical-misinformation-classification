@@ -20,7 +20,6 @@ from peruvian_medical_misinformation.config import load_yaml
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-config", default="configs/base.yaml")
-    parser.add_argument("--edwin-records", default="data/raw/metadata/edwin_157.jsonl")
     parser.add_argument("--scraped-records", default="data/interim/scraped_news.jsonl")
     parser.add_argument("--csv-output", default="")
     parser.add_argument("--log-output", default="")
@@ -34,9 +33,9 @@ def main() -> int:
     config = load_yaml(args.base_config)
     data_config = config["data"]
     corpus_config = config["corpus"]
-    records = load_jsonl(args.edwin_records) + load_jsonl(args.scraped_records)
+    records = load_jsonl(args.scraped_records)
     if not records:
-        raise SystemExit("No hay registros para consolidar. Importa Edwin o ejecuta una colección autorizada.")
+        raise SystemExit("No hay registros para consolidar. Ejecuta una colección autorizada.")
     consolidated = consolidate_records(
         records,
         near_duplicate_threshold=float(config.get("collection", {}).get("near_duplicate_threshold", 0.92)),

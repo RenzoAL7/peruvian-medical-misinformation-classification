@@ -4,34 +4,29 @@ El trabajo activo de este repositorio es exclusivamente la fase 1: construir un
 corpus trazable de noticias médicas peruanas en español. No se entrenan todavía
 los ocho modelos de clasificación.
 
-El corpus combina las noticias de Salud proporcionadas por el profesor
-(`source_dataset=edwin_157`) con noticias públicas de RPP, El Comercio y Latina
-(`scraped_rpp`, `scraped_el_comercio`, `scraped_latina`). La fuente, URL, fecha
-y autor se conservan como metadatos y nunca asignan una etiqueta automática.
+El corpus se construye exclusivamente con noticias públicas de RPP, El Comercio
+y Latina (`scraped_rpp`, `scraped_el_comercio`, `scraped_latina`). La fuente,
+URL, fecha y autor se conservan como metadatos y nunca asignan una etiqueta
+automática.
 
 ## Cómo ejecutar la fase 1
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[scraping,corpus,dev]'
+.venv/bin/python -m pip install -e '.[scraping,dev]'
 .venv/bin/python -m pytest -q
 
-# 1. Integra el XLSX original sin modificarlo.
-.venv/bin/python scripts/00_import_edwin_157.py \
-  --input "/ruta/Dataset FakeNewsEspañol2024.xlsx" \
-  --sheet "DATASET ULIMA 1189"
-
-# 2. Comprueba que período, robots, términos y rutas internas estén registrados.
+# 1. Comprueba que período, robots, términos y rutas internas estén registrados.
 .venv/bin/python scripts/01_discover_urls.py --dry-run
 
-# 3. Tras completar esa configuración, descubre y extrae URLs públicas.
+# 2. Tras completar esa configuración, descubre y extrae URLs públicas.
 .venv/bin/python scripts/01_discover_urls.py
 .venv/bin/python scripts/02_collect_articles.py
 
-# 4. Consolida CSV y resumen. Exige al menos 200 registros únicos válidos.
+# 3. Consolida CSV y resumen. Exige al menos 200 registros únicos válidos.
 .venv/bin/python scripts/03_consolidate_corpus.py --require-minimum
 
-# 5. Genera la plantilla Human-in-the-Loop cuando se alcance el mínimo.
+# 4. Genera la plantilla Human-in-the-Loop cuando se alcance el mínimo.
 .venv/bin/python scripts/04_prepare_annotation.py
 ```
 
@@ -46,9 +41,8 @@ duplicadas**. Los resultados se escriben en
 `reports/collection_summary.json`. El resumen desglosa registros por fuente,
 válidos únicos, duplicados, errores, exclusiones y campos faltantes.
 
-La etiqueta de revisión humana es `0`, `1` o `EXCLUIDA`. La etiqueta original
-de Edwin se mantiene en `source_original_label`; no se traduce automáticamente
-porque su equivalencia debe validarse con evidencia médica.
+La etiqueta de revisión humana es `0`, `1` o `EXCLUIDA`; se completa únicamente
+con evidencia y revisión humana.
 
 ## Corpus privado actual
 
@@ -100,7 +94,6 @@ data/interim/                  # URLs descubiertas, JSONL y log de extracción
 data/processed/                # CSV consolidado; solo el corpus privado se versiona
 data/annotations/              # plantilla de revisión humana, ignorada
 docs/data_schema.md            # diccionario de datos
-scripts/00_import_edwin_157.py
 scripts/01_discover_urls.py
 scripts/02_collect_articles.py
 scripts/03_consolidate_corpus.py

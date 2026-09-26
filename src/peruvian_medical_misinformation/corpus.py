@@ -1,8 +1,4 @@
-"""Extracción, normalización y trazabilidad de noticias médicas públicas.
-
-Este módulo amplía el prototipo ``collection.py`` sin eliminarlo. Los scripts
-de fase 1 usan estas funciones para producir registros con el esquema completo.
-"""
+"""Extracción, normalización y trazabilidad de noticias médicas públicas."""
 
 from __future__ import annotations
 
@@ -52,8 +48,6 @@ CORPUS_FIELDS = [
     "duplicate_status",
     "duplicate_of_record_id",
     "duplicate_similarity",
-    "source_original_label",
-    "source_row_id",
     "run_id",
 ]
 
@@ -249,8 +243,6 @@ def empty_record(*, url: str, source_dataset: str, source_name: str, run_id: str
         "duplicate_status": "not_checked",
         "duplicate_of_record_id": "",
         "duplicate_similarity": "",
-        "source_original_label": "",
-        "source_row_id": "",
         "run_id": run_id,
     }
 
