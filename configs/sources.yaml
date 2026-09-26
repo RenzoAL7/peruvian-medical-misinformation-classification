@@ -1,35 +1,73 @@
-# Fuentes habilitadas para la recolección dirigida.
-# Agregar una fuente exige revisar sus términos, robots.txt y permisos.
+# Fuentes habilitadas para recolección dirigida y reproducible.
+# La ejecución se bloquea hasta que el periodo común y la revisión de cada
+# robots.txt / términos se registren explícitamente en este archivo.
 sources:
   el_comercio:
     name: El Comercio
     enabled: true
-    acquisition: url_manifest
+    source_dataset: scraped_el_comercio
     allowed_domains:
       - elcomercio.pe
       - www.elcomercio.pe
-    notes: >-
-      Fuente principal de noticias. Ingresar URLs elegibles en el manifiesto;
-      no rastrear el dominio completo.
+    discovery:
+      # Solo fuentes internas públicas: categoría, RSS, sitemap o archivo.
+      entrypoints:
+        - kind: sitemap
+          url: https://elcomercio.pe/sitemap/?outputType=xml
+          assume_health_section: false
+    compliance:
+      robots_url: https://elcomercio.pe/robots.txt
+      terms_url: null
+      robots_reviewed_at: 2026-09-26
+      terms_reviewed_at: null
+      scrapy_allowed: false
+      notes: >-
+        robots.txt permite User-agent general salvo rutas específicas. La URL de
+        términos probada devolvió una página 404; no activar hasta identificar y
+        revisar términos vigentes o contar con autorización escrita.
 
   rpp:
     name: RPP Noticias
     enabled: true
-    acquisition: url_manifest
+    source_dataset: scraped_rpp
     allowed_domains:
       - rpp.pe
       - www.rpp.pe
-    notes: >-
-      Priorizar publicaciones de salud y sociedad relacionadas con Perú;
-      ingresar URLs elegibles en el manifiesto.
+    discovery:
+      entrypoints:
+        - kind: sitemap
+          url: https://rpp.pe/sitemap/web
+          assume_health_section: false
+    compliance:
+      robots_url: https://rpp.pe/robots.txt
+      terms_url: null
+      robots_reviewed_at: 2026-09-26
+      terms_reviewed_at: null
+      scrapy_allowed: false
+      notes: >-
+        robots.txt declara User-agent: Scrapy con Disallow: /. No usar Scrapy ni
+        sustituir el User-Agent para eludir la regla. Requiere autorización o un
+        canal de datos permitido por RPP.
 
   latina:
     name: Latina Noticias
     enabled: true
-    acquisition: url_manifest
+    source_dataset: scraped_latina
     allowed_domains:
       - latina.pe
       - www.latina.pe
-    notes: >-
-      Usar noticias médicas publicadas en el portal de noticias; ingresar URLs
-      elegibles en el manifiesto.
+    discovery:
+      entrypoints:
+        - kind: sitemap
+          url: https://www.latina.pe/sitemap.xml
+          assume_health_section: false
+    compliance:
+      robots_url: https://www.latina.pe/robots.txt
+      terms_url: https://www.latina.pe/terminos-y-condiciones/
+      robots_reviewed_at: 2026-09-26
+      terms_reviewed_at: 2026-09-26
+      scrapy_allowed: false
+      notes: >-
+        robots.txt permite el rastreo general, pero los términos públicos
+        restringen la extracción y reutilización de contenidos. No activar sin
+        autorización que cubra la recopilación académica propuesta.

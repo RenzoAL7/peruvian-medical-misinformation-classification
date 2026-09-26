@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Construye el dataset final aceptando únicamente REAL y FAKE."""
+"""Prepara el dataset binario futuro desde etiquetas humanas 0/1.
+
+La fase de adquisición no ejecuta este script. Los casos ``EXCLUIDA`` se
+mantienen auditables en la plantilla HITL, pero no pasan al dataset binario.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ OUTPUT_FIELDS = [
     "label",
     "url",
     "canonical_url",
-    "source_id",
+    "source_dataset",
     "source_name",
     "published_at",
     "retrieved_at",
@@ -30,7 +34,7 @@ OUTPUT_FIELDS = [
     "annotator_2",
     "adjudication",
 ]
-ALLOWED_LABELS = {"REAL", "FAKE"}
+ALLOWED_LABELS = {"0", "1"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,23 +57,26 @@ def main() -> int:
     excluded = 0
     with input_path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        required = {"record_id", "title", "text", "label"}
+        required = {"record_id", "title", "label"}
         missing = required - set(reader.fieldnames or [])
         if missing:
             raise SystemExit(f"Faltan columnas obligatorias: {sorted(missing)}")
         for row in reader:
-            label = (row.get("label") or "").strip().upper()
-            if not label:
+            label = (row.get("label") or "").strip()
+            if not label or label == "EXCLUIDA":
                 excluded += 1
                 continue
             if label not in ALLOWED_LABELS:
                 raise SystemExit(
                     f"Etiqueta no permitida para {row.get('record_id', '')}: {label}. "
-                    "El dataset solo acepta REAL o FAKE."
+                    "El dataset binario solo acepta 0 o 1; EXCLUIDA queda fuera."
                 )
             record_id = (row.get("record_id") or "").strip()
+            body = row.get("body") or row.get("text", "")
             text = "\n\n".join(
-                part.strip() for part in (row.get("title", ""), row.get("text", "")) if part.strip()
+                part.strip()
+                for part in (row.get("title", ""), row.get("subtitle_or_bajada", ""), body)
+                if part.strip()
             )
             if not record_id or not text:
                 excluded += 1

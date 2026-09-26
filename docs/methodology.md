@@ -1,71 +1,90 @@
-# Metodología de Seminario 1
+# Metodología de fase 1: corpus médico peruano
 
 ## 1. Objetivo y alcance
 
-El estudio construye y evalúa modelos para clasificar noticias médicas en
-español relacionadas con Perú. La tarea es estrictamente binaria:
+Esta entrega construye un corpus trazable de noticias médicas en español
+relacionadas con Perú. El entrenamiento y la comparación de modelos ocurren
+después de la adquisición, deduplicación y revisión humana.
+
+La decisión humana futura usa tres estados de anotación:
 
 ```text
-REAL: la afirmación médica central está respaldada por evidencia confiable.
-FAKE: la afirmación médica central es contradicha directamente por evidencia confiable.
+0: la afirmación médica central es compatible con evidencia confiable.
+1: la afirmación médica central es contradicha por evidencia confiable.
+EXCLUIDA: la afirmación es ambigua, no verificable, contradictoria o no separable.
 ```
 
-No se implementan categorías temáticas, clasificación multiclase, ranking de
-fuentes, RAG, generación de respuestas, Triplet Loss ni recomendaciones de
-documentos. Esos componentes no forman parte de Seminario 1.
+El valor `EXCLUIDA` se preserva para auditoría, pero no entra en una posterior
+tarea binaria. La fase 1 no implementa ranking, qrels, RAG, generación ni el
+entrenamiento de clasificadores.
 
 ## 2. Unidad de análisis y fuentes
 
 La unidad de análisis es una noticia o publicación informativa que contiene una
-afirmación médica central verificable. La primera versión del corpus utilizará
-El Comercio, RPP Noticias y Latina Noticias como fuentes periodísticas peruanas
-aprobadas.
+afirmación médica central verificable. El corpus integra dos componentes:
+
+1. Las filas `TOPICS=Salud` del archivo entregado por el profesor, conservadas
+   como `edwin_157` y con `CATEGORY` en `source_original_label`.
+2. Noticias públicas de El Comercio, RPP Noticias y Latina, recolectadas como
+   `scraped_el_comercio`, `scraped_rpp` y `scraped_latina`.
 
 El nombre del medio, la URL y la fecha son metadatos de procedencia. No son
 categorías del modelo y no determinan por sí solos la etiqueta. Una noticia
-publicada por un medio confiable no se marca automáticamente como `REAL`, y
-una noticia de un medio distinto no se marca automáticamente como `FAKE`.
+publicada por un medio confiable no se marca automáticamente como `0`, y una
+noticia de un medio distinto no se marca automáticamente como `1`. La etiqueta
+histórica `REAL/FAKE`, `VERDADERO/FALSO` o similar tampoco se convierte de forma
+automática: se revisa su significado o se vuelve a verificar.
+
+`edwin_157` es un identificador de procedencia solicitado, no una garantía de
+que cualquier archivo recibido tenga exactamente 157 filas de Salud. Cada
+importación informa su conteo y conserva `source_row_id`; una discrepancia debe
+aclararse con quien entregó la base antes de equiparar etiquetas o publicar
+estadísticas finales.
 
 ## 3. Proceso de obtención del dataset
 
 ### 3.1 Registro de fuentes
 
-Cada fuente se registra en `configs/sources.yaml` con un identificador, nombre,
-dominios permitidos y modalidad de adquisición. La extracción comienza con un
-manifiesto local de URLs (`data/raw/source_urls.csv`). Esto permite repetir la
-misma colección y revisar qué páginas fueron incluidas.
+Cada fuente se registra en `configs/sources.yaml` con identificador, dominio,
+`source_dataset`, rutas públicas y evidencia de revisión de `robots.txt` y
+términos. `configs/base.yaml` registra un período común obligatorio antes de
+iniciar Scrapy. Si falta el período, el script falla sin realizar peticiones.
 
-No se rastrean dominios completos ni se evaden controles de acceso. Se usan
-URLs obtenidas mediante búsqueda dirigida, RSS, APIs públicas o selección
-manual, respetando términos de uso, robots.txt, límites de consulta y derechos
-de reproducción.
+No se rastrean dominios completos ni se evaden controles de acceso. Las URLs se
+descubren solo desde categorías, RSS, sitemaps, archivos o buscadores internos
+públicos configurados; no se extraen resultados de Google u otros buscadores.
 
 ### 3.2 Extracción dirigida
 
-`scripts/01_collect_sources.py` valida que cada URL use HTTP(S) y pertenezca al
-dominio autorizado. Para cada página registra:
+`scripts/01_discover_urls.py` crea un manifiesto reproducible. Luego
+`scripts/02_collect_articles.py` usa Scrapy para validar el dominio permitido,
+respetar `robots.txt`, pausar solicitudes, limitar reintentos y almacenar caché.
+Para cada página registra:
 
 - URL original y URL canónica cuando está disponible;
 - identificador estable derivado de la URL;
-- fuente y dominio;
+- `source_dataset`, fuente y dominio;
 - fecha de descarga;
 - título y fecha de publicación detectados;
-- texto extraído;
-- método y estado de extracción;
+- título, bajada, cuerpo, autor y sección extraídos;
+- HTML original versionado, hashes de texto y texto normalizado;
+- método, estado y razón de extracción;
 - código HTTP o mensaje de error.
 
-El resultado es un JSONL local. No se guarda HTML innecesario en el repositorio
-ni se versionan los textos descargados.
+El resultado es `data/interim/scraped_news.jsonl`, metadatos por corrida,
+`extraction_log.csv` y HTML fuera de Git. La captura anterior nunca se
+sobrescribe si una página se vuelve a procesar.
 
 ### 3.3 Limpieza y control inicial
 
-Se eliminan elementos de navegación, scripts, publicidad y espacios repetidos.
-Se conservan el registro original y la versión limpia para poder auditar la
-transformación. Los registros sin texto suficiente pasan a revisión y no se
-incluyen automáticamente en el dataset final.
+Trafilatura elimina el contenido de navegación y BeautifulSoup solo actúa como
+respaldo. El texto se normaliza con Unicode NFKC y espacios consistentes, sin
+eliminar tildes ni negaciones como `no`, `sin` o `nunca`. Los registros vacíos,
+demasiado cortos o con idioma no confirmado se excluyen o pasan a revisión.
 
-Se eliminan duplicados por URL canónica y se revisan duplicados de contenido,
-noticias sindicadas y copias con cambios mínimos. El proceso no inventa texto
+Se marcan duplicados por URL canónica, hash exacto y similitud alta de tokens;
+la fila original permanece con `duplicate_status`,
+`duplicate_of_record_id` y `duplicate_similarity`. El proceso no inventa texto
 cuando una página no puede extraerse: registra el fallo y conserva la URL para
 revisión manual.
 
@@ -91,55 +110,37 @@ anotación.
 
 ### 4.3 Regla de etiqueta
 
-- `REAL`: la afirmación central está respaldada por la evidencia seleccionada.
-- `FAKE`: la evidencia seleccionada contradice directamente la afirmación.
+- `0`: la afirmación central es compatible con la evidencia seleccionada.
+- `1`: la evidencia seleccionada contradice directamente la afirmación.
+- `EXCLUIDA`: no existe evidencia suficiente, la afirmación es ambigua o las
+  afirmaciones no se pueden separar sin alterar el sentido de la noticia.
 
-Los casos ambiguos, no verificables, sin evidencia suficiente o con afirmaciones
-múltiples se excluyen del dataset final. No se convierten en una tercera clase.
+Los casos `EXCLUIDA` quedan documentados y no entran en el posterior dataset
+binario. Dos revisores registran la decisión cuando sea posible y resuelven la
+discrepancia mediante consenso; ningún modelo de lenguaje etiqueta por sí solo.
 
-El piloto de 200 registros permite revisar la claridad de estas reglas antes de
-escalar hacia un corpus aproximado de 1,000 registros, idealmente balanceado
-entre ambas etiquetas.
+El mínimo de 200 registros válidos y no duplicados permite revisar la claridad
+de estas reglas antes de definir cualquier ampliación posterior del corpus.
 
 ## 5. Esquema de datos
 
-La hoja de anotación conserva la procedencia y la decisión:
+El corpus consolidado conserva URL, URL canónica, fechas, título, bajada, cuerpo,
+autor, sección, HTML original, hashes, idioma, método, estado de extracción y
+estado de duplicado. El diccionario completo está en `docs/data_schema.md`.
 
-```text
-record_id
-url
-canonical_url
-source_name
-published_at
-retrieved_at
-title
-text
-claim_text
-label
-evidence_url
-evidence_type
-pmid
-pubmed_query
-query_date
-verdict_reason
-annotator_1
-annotator_2
-adjudication
-notes
-```
-
-La variable usada para el entrenamiento es `label`, con valores únicamente
-`REAL` y `FAKE`. `source_name`, `evidence_url` y las demás columnas de auditoría
-no son clases ni deben incorporarse como características sin una justificación
-experimental explícita.
+La plantilla añade `main_medical_claim`, las fuentes e identificadores de
+evidencia, dos revisores, estado de revisión, desacuerdo, razón y fecha. La
+variable futura `label` solo acepta `0` o `1` para entrenamiento; `EXCLUIDA`
+permanece fuera del conjunto binario. `source_name`, `evidence_url` y las demás
+columnas de auditoría no deben incorporarse como características.
 
 ## 6. Preparación para el entrenamiento
 
-Antes del split se eliminan duplicados, conflictos de etiqueta y registros sin
-texto. El texto de entrada se define de forma fija, por ejemplo como título más
-cuerpo limpio. Las particiones de entrenamiento, validación y prueba se
-realizan de forma estratificada y evitando que la misma URL, copia o evento
-noticioso aparezca en particiones distintas.
+Antes del split se marcan duplicados, conflictos de etiqueta y registros sin
+texto; las filas originales se conservan para auditoría. El texto de entrada se
+define de forma fija como título + bajada + cuerpo normalizado. Las particiones
+de entrenamiento, validación y prueba (70/15/15) se harán de forma estratificada
+y evitando que la misma URL, copia o evento aparezca en particiones distintas.
 
 La evidencia y la decisión de los anotadores se conservan para auditoría, pero
 no se usan para crear una predicción privilegiada. Así se evita la fuga de
@@ -149,15 +150,36 @@ información hacia el modelo.
 
 Se comparan representaciones y clasificadores binarios:
 
-- TF-IDF con regresión logística, SVM y Naive Bayes;
-- embeddings de palabras con modelos recurrentes;
-- sentence transformers con un clasificador binario;
-- transformers en español con una cabeza de clasificación.
+- TF-IDF con Naive Bayes, regresión logística y SVM lineal;
+- GloVe + BiLSTM y Word2Vec + LSTM;
+- BERT, BETO y RoBERTa-BNE, cada uno con una capa binaria.
 
 La métrica principal es Macro-F1. También se reportan precision, recall,
 ROC-AUC, matriz de confusión y análisis descriptivo de errores.
 
-## 8. Reproducibilidad y límites
+## 8. Relación con trabajos previos
+
+La documentación final debe contrastar las copias disponibles de los artículos
+antes de atribuirles resultados concretos. La relación de diseño solicitada es:
+
+- Pande et al. (2022): respalda conectar adquisición automática de noticias con
+  clasificación textual, sin que la recolección decida la veracidad.
+- Bonet-Jover et al. (2023): respalda el procedimiento Human-in-the-Loop y la
+  resolución de discrepancias entre revisores.
+- Noor et al. (2025) y Obunadike et al. (2025): motivan la limpieza y
+  normalización conservando señales médicas relevantes, incluidas negaciones.
+- Blanco-Fernández et al. (2024): motiva conservar fuente, URL y duplicados
+  para medir posteriormente la generalización entre fuentes reales.
+- Nina et al. (2025): justifica comparar representaciones tradicionales, redes
+  neuronales y Transformers en una fase posterior, no en esta entrega.
+- Alghamdi et al. (2023): motiva evaluar arquitecturas profundas en el dominio
+  sanitario después de completar el corpus anotado.
+
+Estas relaciones son requisitos metodológicos del proyecto; las citas
+bibliográficas, resultados y conclusiones de cada artículo se añadirán solo
+después de verificar los archivos fuente correspondientes.
+
+## 9. Reproducibilidad y límites
 
 Cada ejecución debe conservar la versión del manifiesto, fecha de extracción,
 configuración, estado HTTP, versión del código y conteos antes y después de
@@ -166,5 +188,5 @@ suben a Git.
 
 Scopus se mantiene fuera de la construcción del dataset: se usa para buscar y
 documentar papers. PubMed y las fuentes sanitarias se usan para justificar las
-etiquetas. El resultado de Seminario 1 es un clasificador binario reproducible,
-no un sistema de recomendación ni un verificador automático autónomo.
+etiquetas. El resultado de esta fase es un corpus reproducible listo para
+revisión humana, no un sistema de recomendación ni un verificador automático.

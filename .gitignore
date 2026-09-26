@@ -15,12 +15,20 @@ checkpoints/
 # Datos locales y artefactos generados
 data/raw/*
 !data/raw/.gitkeep
+!data/raw/html/
+data/raw/html/*
+!data/raw/html/.gitkeep
+!data/raw/metadata/
+data/raw/metadata/*
+!data/raw/metadata/.gitkeep
 data/interim/*
 !data/interim/.gitkeep
 data/annotations/*
 !data/annotations/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+reports/*
+!reports/.gitkeep
 
 # Credenciales y archivos pesados comunes
 *.key

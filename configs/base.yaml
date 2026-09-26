@@ -1,36 +1,71 @@
 # Configuración reproducible de Seminario 1.
 project:
   name: peruvian-medical-misinformation-classification
-  stage: seminario_1
-  task: binary_text_classification
+  stage: corpus_acquisition_phase_1
+  task: medical_misinformation_corpus_construction
   seed: 42
-  labels: [REAL, FAKE]
+  labels: [0, 1, EXCLUIDA]
 
 corpus:
   language: es
   country_context: PE
-  primary_source: el_comercio
-  approved_sources: [el_comercio, rpp, latina]
-  pilot_size: 200
-  target_size: 1000
-  target_per_label: 500
+  components: [edwin_157, scraped_rpp, scraped_el_comercio, scraped_latina]
+  minimum_records_before_annotation: 200
+  text_for_model: title + subtitle_or_bajada + body
+  labels_are_human_review_only: true
 
 data:
-  source_manifest: data/raw/source_urls.csv
-  collected_records: data/raw/articles.jsonl
+  edwin_input: data/raw/edwin_157.xlsx
+  edwin_sheet: DATASET ULIMA 1189
+  discovered_urls: data/interim/discovered_urls.csv
+  collected_records: data/interim/scraped_news.jsonl
+  extraction_log: data/interim/extraction_log.csv
+  raw_html_dir: data/raw/html
+  raw_metadata_dir: data/raw/metadata
+  corpus_csv: data/processed/medical_news_corpus.csv
+  corpus_parquet: data/processed/medical_news_corpus.parquet
   annotation_template: data/annotations/annotation_template.csv
-  final_dataset: data/processed/medical_misinformation_binary.csv
+  collection_summary: reports/collection_summary.json
 
 collection:
+  period:
+    start: null # Obligatorio antes de una extracción; no se infiere automáticamente.
+    end: null   # Obligatorio antes de una extracción; no se infiere automáticamente.
+  user_agent: "peruvian-medical-misinformation-research/0.2 (+https://github.com/RenzoAL7/peruvian-medical-misinformation-classification)"
   timeout_seconds: 30
-  max_urls_per_run: 0
-  user_agent: peruvian-medical-misinformation-research/0.1
+  download_delay_seconds: 1.5
+  concurrent_requests_per_domain: 1
+  retry_times: 2
+  retry_backoff_base_seconds: 2
+  retry_backoff_max_seconds: 30
+  max_urls_per_run: 300
+  max_discovery_pages_per_source: 30
+  cache_enabled: true
+  robots_txt_obey: true
   require_allowlisted_domain: true
+  minimum_body_characters: 240
+  near_duplicate_threshold: 0.92
+  keywords:
+    - salud
+    - medicina
+    - enfermedad
+    - tratamiento
+    - medicamento
+    - vacuna
+    - sintomas
+    - prevención
+    - virus
+    - cáncer
+    - diabetes
+    - nutrición
+    - pandemia
+    - salud pública
 
 annotation:
-  allowed_labels: [REAL, FAKE]
+  allowed_labels: [0, 1, EXCLUIDA]
   evidence_sources: [PubMed, MINSA, INS, EsSalud, OMS, OPS]
-  ambiguous_records: exclude_from_final_dataset
+  ambiguous_records: EXCLUIDA
+  reviewers_required: 2
 
 split:
   train: 0.70
@@ -41,18 +76,16 @@ split:
 
 models:
   classical:
-    - tfidf_logistic_regression
-    - tfidf_svm
     - tfidf_naive_bayes
+    - tfidf_logistic_regression
+    - tfidf_linear_svm
   embeddings:
     - glove_bilstm
     - word2vec_lstm
-    - sentence_transformer_logistic_regression
   transformers:
-    - BETO
-    - RoBERTa
-    - DistilBERT
-    - DeBERTa
+    - bert_binary
+    - beto_binary
+    - roberta_bne_binary
 
 evaluation:
   primary_metric: macro_f1

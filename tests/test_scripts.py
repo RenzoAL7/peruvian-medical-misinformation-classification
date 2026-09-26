@@ -21,16 +21,17 @@ def run_script(script: str, *arguments: str) -> subprocess.CompletedProcess[str]
     )
 
 
-def test_binary_builder_outputs_only_labeled_binary_rows(tmp_path):
+def test_binary_builder_outputs_only_human_reviewed_binary_rows(tmp_path):
     input_path = tmp_path / "annotations.csv"
     output_path = tmp_path / "processed.csv"
-    fields = ["record_id", "title", "text", "label", "source_name"]
+    fields = ["record_id", "title", "subtitle_or_bajada", "body", "label", "source_name"]
     with input_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        writer.writerow({"record_id": "r1", "title": "Título 1", "text": "Texto 1", "label": "REAL"})
-        writer.writerow({"record_id": "r2", "title": "Título 2", "text": "Texto 2", "label": "FAKE"})
-        writer.writerow({"record_id": "r3", "title": "Sin etiqueta", "text": "Texto 3", "label": ""})
+        writer.writerow({"record_id": "r1", "title": "Título 1", "subtitle_or_bajada": "Bajada 1", "body": "Texto 1", "label": "0"})
+        writer.writerow({"record_id": "r2", "title": "Título 2", "body": "Texto 2", "label": "1"})
+        writer.writerow({"record_id": "r3", "title": "Excluida", "body": "Texto 3", "label": "EXCLUIDA"})
+        writer.writerow({"record_id": "r4", "title": "Sin etiqueta", "body": "Texto 4", "label": ""})
 
     result = run_script(
         "03_build_binary_dataset.py",
@@ -43,15 +44,15 @@ def test_binary_builder_outputs_only_labeled_binary_rows(tmp_path):
     assert result.returncode == 0, result.stderr
     with output_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert [row["label"] for row in rows] == ["REAL", "FAKE"]
-    assert rows[0]["text"] == "Título 1\n\nTexto 1"
+    assert [row["label"] for row in rows] == ["0", "1"]
+    assert rows[0]["text"] == "Título 1\n\nBajada 1\n\nTexto 1"
 
 
 def test_binary_builder_rejects_a_third_label(tmp_path):
     input_path = tmp_path / "annotations.csv"
     output_path = tmp_path / "processed.csv"
     input_path.write_text(
-        "record_id,title,text,label\nr1,Título,Texto,EXCLUIDA\n",
+        "record_id,title,body,label\nr1,Título,Texto,PENDIENTE\n",
         encoding="utf-8",
     )
 
@@ -64,4 +65,4 @@ def test_binary_builder_rejects_a_third_label(tmp_path):
     )
 
     assert result.returncode != 0
-    assert "solo acepta REAL o FAKE" in result.stderr
+    assert "solo acepta 0 o 1" in result.stderr
