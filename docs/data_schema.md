@@ -10,7 +10,7 @@ parcial, para no perder trazabilidad.
 
 ## 1. Candidatas de una corrida
 
-Cada ejecución de 01_collect_newsdata_urls.py crea data/01_candidates/<run_id>.csv. Una fila representa una candidata devuelta por NewsData.io, no una noticia ya validada.
+Cada ejecución de 01_collect_newsdata_urls.py crea data/01_candidates/<run_id>.csv. Una fila representa una candidata descubierta por NewsData.io o por un archivo público permitido, no una noticia ya validada.
 
 | Campo | Descripción |
 | --- | --- |
@@ -18,11 +18,11 @@ Cada ejecución de 01_collect_newsdata_urls.py crea data/01_candidates/<run_id>.
 | record_id | Hash corto y estable de la URL canónica. |
 | source_dataset, source_id, source_name, source_domain | Procedencia configurada. |
 | url, canonical_url | Enlace recibido y versión sin parámetros de seguimiento. |
-| title, description, author | Metadatos de texto suministrados por la API. |
-| published_at, language, country, category | Fecha y clasificación declaradas por la API. |
-| newsdata_article_id, api_query, retrieved_at | Trazabilidad de la respuesta y de la consulta. |
+| title, description, author | Metadatos de texto suministrados por la API o el archivo público. |
+| published_at, language, country, category | Fecha y clasificación declaradas por la API; los campos no presentes en el archivo quedan vacíos hasta la revisión. |
+| newsdata_article_id, api_query, retrieved_at | Trazabilidad de la respuesta o del archivo de descubrimiento y de la consulta. |
 
-Los valores permitidos de source_dataset son newsdata_el_comercio, newsdata_rpp, archive_latina, newsdata_el_peruano, newsdata_peru21 y newsdata_la_republica. `archive_latina` identifica candidatas descubiertas en los archivos públicos de Salud y Medicina de Latina, no artículos obtenidos desde NewsData.
+Los valores permitidos de source_dataset son newsdata_el_comercio, newsdata_rpp, archive_latina, newsdata_latina, newsdata_el_peruano, archive_peru21, newsdata_peru21 y newsdata_la_republica. `archive_latina` y `archive_peru21` identifican candidatas descubiertas en archivos públicos; los valores `newsdata_*` identifican las candidatas recibidas desde la API de respaldo.
 
 ## 2. Revisión humana
 

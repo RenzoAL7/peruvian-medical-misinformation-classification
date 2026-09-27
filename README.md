@@ -13,7 +13,7 @@ Cada corrida busca hasta 12 candidatas: 2 de cada medio.
 5. Perú21
 6. La República
 
-NewsData.io entrega metadatos de descubrimiento para las fuentes que cubre. Latina Noticias se descubre directamente desde sus archivos públicos de [Salud](https://latinanoticias.pe/noticias-sobre/salud/) y [Medicina](https://latinanoticias.pe/noticias-sobre/medicina/), porque NewsData no indexó de forma utilizable ese medio en la corrida piloto. En Latina, las palabras clave solo filtran candidatas de archivo para evitar menú, publicidad y notas ajenas; la revisión manual sigue decidiendo si una noticia es médica y su etiqueta. El medio no determina si la noticia es médica ni cuál será su etiqueta.
+NewsData.io entrega metadatos de descubrimiento para las fuentes que cubre. Latina Noticias se descubre directamente desde sus archivos públicos de [Salud](https://latinanoticias.pe/noticias-sobre/salud/) y [Medicina](https://latinanoticias.pe/noticias-sobre/medicina/); Perú21 usa su archivo público de [Salud](https://peru21.pe/noticias/salud/). En ambas fuentes, NewsData queda configurado como respaldo si los archivos públicos no alcanzan las dos URLs. Las palabras clave solo filtran candidatas para evitar menú, publicidad y notas ajenas; la revisión manual sigue decidiendo si una noticia es médica y su etiqueta. El medio no determina si la noticia es médica ni cuál será su etiqueta.
 
 ## Carpetas
 

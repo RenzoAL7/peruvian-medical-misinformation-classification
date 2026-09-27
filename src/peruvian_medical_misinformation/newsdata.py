@@ -162,7 +162,7 @@ def normalize_article(
         "run_id": run_id,
         "seeded_from_run_id": "",
         "record_id": record_id(normalized_url),
-        "source_dataset": str(source["source_dataset"]),
+        "source_dataset": str(source.get("newsdata_source_dataset") or source["source_dataset"]),
         "source_id": source_id,
         "source_name": str(source["name"]),
         "source_domain": domain,
@@ -258,7 +258,16 @@ def normalize_archive_article(
     except ValueError:
         return None
     domain = str(source["domain"])
-    if not has_source_domain(normalized_url, domain) or not ARTICLE_URL_PATTERN.search(urlsplit(normalized_url).path):
+    path = urlsplit(normalized_url).path
+    prefixes = [str(prefix) for prefix in source.get("article_url_prefixes", []) if str(prefix).strip()]
+    is_article_url = (
+        True
+        if source.get("allow_selected_article_urls", False)
+        else any(path.startswith(prefix) for prefix in prefixes)
+        if prefixes
+        else bool(ARTICLE_URL_PATTERN.search(path))
+    )
+    if not has_source_domain(normalized_url, domain) or not is_article_url:
         return None
     clean_title = title.strip()
     if not clean_title:
@@ -302,9 +311,10 @@ def archive_candidates_from_html(
 
     soup = BeautifulSoup(html, "html.parser")
     candidates: dict[str, dict[str, str]] = {}
-    # Latina publica sus entradas de archivo como tarjetas main-card; los
-    # enlaces restantes incluyen navegación, publicidad y "más vistos".
-    anchors = soup.select("section#principal figure.main-card a[href]")
+    # Cada fuente declara el selector de sus tarjetas editoriales. Latina usa
+    # main-card; Perú21 usa nodos Drupal dentro de view-content.
+    selector = str(source.get("article_link_selector") or "section#principal figure.main-card a[href]")
+    anchors = soup.select(selector)
     if not anchors:
         anchors = soup.select("a[href]")
     for anchor in anchors:
@@ -319,7 +329,11 @@ def archive_candidates_from_html(
             retrieved_at=retrieved_at,
         )
         if row is not None:
-            candidates.setdefault(row["canonical_url"], row)
+            existing = candidates.get(row["canonical_url"])
+            # Una tarjeta puede enlazar la imagen y el titular. Se prefiere el
+            # texto más informativo, para no conservar valores como "Imagen".
+            if existing is None or len(row["title"]) > len(existing["title"]):
+                candidates[row["canonical_url"]] = row
     return list(candidates.values())
 
 
@@ -477,7 +491,8 @@ def collect_candidates(
                 "seeded": len(seeded_by_source[source_id]),
                 "status": source_status,
             }
-            continue
+            if len(selected) >= limit or not source.get("newsdata_fallback", False):
+                continue
         for query in queries:
             if len(selected) >= limit or requests_made >= max_requests:
                 break
@@ -487,7 +502,7 @@ def collect_candidates(
                 break
             params = {
                 "apikey": api_key,
-                "domainurl": str(source["domain"]),
+                "domainurl": str(source.get("newsdata_domain") or source["domain"]),
                 "language": str(batch.get("language", "es")),
                 "country": str(batch.get("country", "pe")),
                 "category": str(batch.get("category", "health")),

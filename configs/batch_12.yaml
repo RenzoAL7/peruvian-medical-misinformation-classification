@@ -45,6 +45,10 @@ sources:
     source_dataset: archive_latina
     domain: latinanoticias.pe
     discovery: archive
+    newsdata_fallback: true
+    # Alias aceptado por NewsData; solo se usa si el archivo público no entrega 2 URLs.
+    newsdata_domain: latina.pe
+    newsdata_source_dataset: newsdata_latina
     archive_urls:
       - https://latinanoticias.pe/noticias-sobre/salud/
       - https://latinanoticias.pe/noticias-sobre/medicina/
@@ -75,8 +79,44 @@ sources:
     domain: elperuano.pe
   peru21:
     name: Perú21
-    source_dataset: newsdata_peru21
+    # NewsData puede no tener resultados recientes de Perú21. Se recurre a su
+    # archivo público de Salud y a una segunda página permitida por robots.txt.
+    source_dataset: archive_peru21
     domain: peru21.pe
+    discovery: archive
+    newsdata_fallback: true
+    newsdata_source_dataset: newsdata_peru21
+    archive_urls:
+      - https://peru21.pe/noticias/salud/
+      - https://peru21.pe/noticias/salud/2/
+    article_link_selector: "div.view-content article.node--type-article a[href]"
+    # El selector ya limita enlaces a tarjetas de artículos; Perú21 publica
+    # noticias de Salud bajo varias secciones (vida, lima, peru, opinión).
+    allow_selected_article_urls: true
+    candidate_keywords:
+      - salud
+      - medicina
+      - médico
+      - medicos
+      - enfermedad
+      - tratamiento
+      - medicamento
+      - vacuna
+      - cáncer
+      - cancer
+      - diabetes
+      - hígado
+      - higado
+      - hospital
+      - essalud
+      - minsa
+      - síntomas
+      - sintomas
+      - prevención
+      - prevencion
+      - virus
+      - migraña
+      - migrana
   la_republica:
     name: La República
     source_dataset: newsdata_la_republica

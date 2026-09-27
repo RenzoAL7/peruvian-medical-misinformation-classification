@@ -79,6 +79,37 @@ def test_collect_candidates_uses_archive_source_without_api_request() -> None:
     assert len(rows) == 2
     assert summary["total_requests"] == 0
     assert summary["archive_requests_total"] == 1
+
+
+def test_archive_candidates_support_peru21_card_selector_and_title_preference() -> None:
+    source = {
+        "name": "Perú21",
+        "source_dataset": "archive_peru21",
+        "domain": "peru21.pe",
+        "article_link_selector": "div.view-content article a[href]",
+        "allow_selected_article_urls": True,
+        "candidate_keywords": ["salud", "higado"],
+    }
+    html = """
+    <div class="view-content"><article>
+      <a href="/vida/factores-de-riesgo-salud-higado/"><img alt="Imagen" /></a>
+      <a href="/vida/factores-de-riesgo-salud-higado/">Factores de riesgo para la salud del hígado</a>
+    </article></div>
+    <a href="/noticias/salud/2/">Siguiente página</a>
+    """
+
+    rows = archive_candidates_from_html(
+        html,
+        archive_url="https://peru21.pe/noticias/salud/",
+        source_id="peru21",
+        source=source,
+        run_id="test_run",
+        retrieved_at="2026-09-27T00:00:00+00:00",
+    )
+
+    assert [(row["title"], row["canonical_url"]) for row in rows] == [
+        ("Factores de riesgo para la salud del hígado", "https://peru21.pe/vida/factores-de-riesgo-salud-higado/"),
+    ]
 from peruvian_medical_misinformation.review import review_rows, review_to_training_rows
 
 
