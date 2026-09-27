@@ -18,6 +18,7 @@ from peruvian_medical_misinformation.newsdata import (
     api_key_from_environment,
     collect_candidates,
     httpx_json_request,
+    httpx_html_request,
     load_local_env,
     load_yaml,
     next_run_number,
@@ -94,6 +95,7 @@ def main() -> int:
         api_key=api_key,
         run_id=run_id,
         request_json=httpx_json_request(float(batch["timeout_seconds"])),
+        request_html=httpx_html_request(float(batch["timeout_seconds"])),
         seeded_rows=seeded_rows,
     )
     summary["config_path"] = str(config_path.relative_to(REPOSITORY_ROOT))

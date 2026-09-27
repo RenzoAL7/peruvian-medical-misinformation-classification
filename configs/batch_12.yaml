@@ -40,8 +40,35 @@ sources:
     domain: rpp.pe
   latina:
     name: Latina Noticias
-    source_dataset: newsdata_latina
+    # NewsData no cataloga de forma fiable este dominio. Las candidatas se
+    # descubren desde dos archivos públicos permitidos por robots.txt.
+    source_dataset: archive_latina
     domain: latinanoticias.pe
+    discovery: archive
+    archive_urls:
+      - https://latinanoticias.pe/noticias-sobre/salud/
+      - https://latinanoticias.pe/noticias-sobre/medicina/
+    # Filtro de descubrimiento, no de veracidad ni de pertinencia final.
+    candidate_keywords:
+      - salud
+      - medicina
+      - médico
+      - medicos
+      - enfermedad
+      - tratamiento
+      - medicamento
+      - vacuna
+      - cáncer
+      - cancer
+      - diabetes
+      - hospital
+      - essalud
+      - minsa
+      - oncólogo
+      - oncologo
+      - fisioterapia
+      - órganos
+      - organos
   el_peruano:
     name: El Peruano
     source_dataset: newsdata_el_peruano

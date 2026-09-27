@@ -6,12 +6,79 @@ import pandas as pd
 
 from peruvian_medical_misinformation.newsdata import (
     NewsDataRateLimitError,
+    archive_candidates_from_html,
     append_run_registry,
     collect_candidates,
     next_run_number,
     read_run_registry,
     run_status,
 )
+
+
+def test_archive_candidates_keep_article_links_and_ignore_navigation() -> None:
+    source = {"name": "Latina Noticias", "source_dataset": "archive_latina", "domain": "latinanoticias.pe"}
+    html = """
+    <section id="principal">
+      <figure class="main-card"><a href="/te-ayudo/mitos-sobre-el-cancer_20260808/"><img alt="Mitos sobre el cáncer" /></a></figure>
+      <figure class="main-card"><a href="https://latinanoticias.pe/lima/hospital-en-crisis_20260306/">Hospital en crisis</a></figure>
+    </section>
+    <a href="https://latinanoticias.pe/deportes/partido_20260306/">Navegación</a>
+    """
+
+    rows = archive_candidates_from_html(
+        html,
+        archive_url="https://latinanoticias.pe/noticias-sobre/medicina/",
+        source_id="latina",
+        source=source,
+        run_id="test_run",
+        retrieved_at="2026-09-27T00:00:00+00:00",
+    )
+
+    assert [(row["title"], row["source_dataset"]) for row in rows] == [
+        ("Mitos sobre el cáncer", "archive_latina"),
+        ("Hospital en crisis", "archive_latina"),
+    ]
+
+
+def test_collect_candidates_uses_archive_source_without_api_request() -> None:
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 2,
+            "per_source_limit": 2,
+            "health_queries": ["salud"],
+        },
+        "sources": {
+            "latina": {
+                "name": "Latina Noticias",
+                "source_dataset": "archive_latina",
+                "domain": "latinanoticias.pe",
+                "discovery": "archive",
+                "archive_urls": ["https://latinanoticias.pe/noticias-sobre/salud/"],
+            }
+        },
+    }
+    html = """
+    <section id="principal">
+      <figure class="main-card"><a href="/lima/salud-uno_20260901/">Salud uno</a></figure>
+      <figure class="main-card"><a href="/lima/salud-dos_20260902/">Salud dos</a></figure>
+    </section>
+    """
+
+    rows, summary = collect_candidates(
+        config,
+        api_key="secret",
+        run_id="test_run",
+        request_json=lambda *_: (_ for _ in ()).throw(AssertionError("No debe llamar a la API")),
+        request_html=lambda _: html,
+        sleep=lambda _: None,
+    )
+
+    assert len(rows) == 2
+    assert summary["total_requests"] == 0
+    assert summary["archive_requests_total"] == 1
 from peruvian_medical_misinformation.review import review_rows, review_to_training_rows
 
 

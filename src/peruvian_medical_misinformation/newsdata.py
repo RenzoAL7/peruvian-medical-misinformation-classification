@@ -10,14 +10,17 @@ import csv
 import hashlib
 import json
 import os
+import re
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 import yaml
+from bs4 import BeautifulSoup
 
 
 CANDIDATE_FIELDS = [
@@ -60,6 +63,7 @@ RUN_REGISTRY_FIELDS = [
 ]
 
 TRACKING_PARAMETERS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
+ARTICLE_URL_PATTERN = re.compile(r"_\d{8}/?$")
 
 
 class NewsDataConfigurationError(ValueError):
@@ -219,6 +223,106 @@ def normalize_seeded_article(
     }
 
 
+def archive_title(anchor: Any) -> str:
+    """Obtiene el título visible o el alt de la imagen dentro de un enlace."""
+
+    text = anchor.get_text(" ", strip=True)
+    if text:
+        return text
+    image = anchor.select_one("img[alt]")
+    return str(image.get("alt") or "").strip() if image else ""
+
+
+def discovery_text(value: str) -> str:
+    """Normaliza mínimamente texto para el filtro de descubrimiento de URLs."""
+
+    return "".join(
+        character for character in unicodedata.normalize("NFKD", value.casefold()) if not unicodedata.combining(character)
+    )
+
+
+def normalize_archive_article(
+    *,
+    raw_url: str,
+    title: str,
+    source_id: str,
+    source: Mapping[str, Any],
+    run_id: str,
+    archive_url: str,
+    retrieved_at: str,
+) -> dict[str, str] | None:
+    """Convierte un enlace de archivo público en una candidata trazable."""
+
+    try:
+        normalized_url = canonicalize_url(raw_url)
+    except ValueError:
+        return None
+    domain = str(source["domain"])
+    if not has_source_domain(normalized_url, domain) or not ARTICLE_URL_PATTERN.search(urlsplit(normalized_url).path):
+        return None
+    clean_title = title.strip()
+    if not clean_title:
+        return None
+    keywords = [discovery_text(str(keyword)) for keyword in source.get("candidate_keywords", []) if str(keyword).strip()]
+    if keywords and not any(keyword in discovery_text(f"{clean_title} {normalized_url}") for keyword in keywords):
+        return None
+    return {
+        "run_id": run_id,
+        "seeded_from_run_id": "",
+        "record_id": record_id(normalized_url),
+        "source_dataset": str(source["source_dataset"]),
+        "source_id": source_id,
+        "source_name": str(source["name"]),
+        "source_domain": domain,
+        "url": raw_url,
+        "canonical_url": normalized_url,
+        "title": clean_title,
+        "description": "",
+        "author": "",
+        "published_at": "",
+        "language": "es",
+        "country": "pe",
+        "category": "health_archive",
+        "newsdata_article_id": "",
+        "api_query": f"archive:{archive_url}",
+        "retrieved_at": retrieved_at,
+    }
+
+
+def archive_candidates_from_html(
+    html: str,
+    *,
+    archive_url: str,
+    source_id: str,
+    source: Mapping[str, Any],
+    run_id: str,
+    retrieved_at: str,
+) -> list[dict[str, str]]:
+    """Extrae enlaces de artículos, no menús ni rutas de archivo, de una página pública."""
+
+    soup = BeautifulSoup(html, "html.parser")
+    candidates: dict[str, dict[str, str]] = {}
+    # Latina publica sus entradas de archivo como tarjetas main-card; los
+    # enlaces restantes incluyen navegación, publicidad y "más vistos".
+    anchors = soup.select("section#principal figure.main-card a[href]")
+    if not anchors:
+        anchors = soup.select("a[href]")
+    for anchor in anchors:
+        raw_url = urljoin(archive_url, str(anchor["href"]))
+        row = normalize_archive_article(
+            raw_url=raw_url,
+            title=archive_title(anchor),
+            source_id=source_id,
+            source=source,
+            run_id=run_id,
+            archive_url=archive_url,
+            retrieved_at=retrieved_at,
+        )
+        if row is not None:
+            candidates.setdefault(row["canonical_url"], row)
+    return list(candidates.values())
+
+
 def validate_batch_config(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Mapping[str, Any]]]:
     batch = config.get("batch")
     sources = config.get("sources")
@@ -232,6 +336,11 @@ def validate_batch_config(config: Mapping[str, Any]) -> tuple[Mapping[str, Any],
     for source_id, source in sources.items():
         if not isinstance(source, Mapping) or not all(source.get(key) for key in ("name", "source_dataset", "domain")):
             raise NewsDataConfigurationError(f"Fuente inválida: {source_id}")
+        discovery = str(source.get("discovery", "newsdata"))
+        if discovery not in {"newsdata", "archive"}:
+            raise NewsDataConfigurationError(f"Tipo de descubrimiento inválido para {source_id}: {discovery}")
+        if discovery == "archive" and not source.get("archive_urls"):
+            raise NewsDataConfigurationError(f"Faltan archive_urls para {source_id}")
         valid_sources[str(source_id)] = source
     if not valid_sources:
         raise NewsDataConfigurationError("No hay fuentes configuradas")
@@ -245,6 +354,7 @@ def validate_batch_config(config: Mapping[str, Any]) -> tuple[Mapping[str, Any],
 
 
 RequestJSON = Callable[[str, Mapping[str, str]], Mapping[str, Any]]
+RequestHTML = Callable[[str], str]
 
 
 def httpx_json_request(timeout_seconds: float) -> RequestJSON:
@@ -269,12 +379,30 @@ def httpx_json_request(timeout_seconds: float) -> RequestJSON:
     return request
 
 
+def httpx_html_request(timeout_seconds: float) -> RequestHTML:
+    """Lee HTML público para descubrir enlaces; no descarga cuerpos de artículos."""
+
+    headers = {
+        "User-Agent": "peruvian-medical-misinformation-research/0.1 "
+        "(academic corpus discovery; contact: research@example.invalid)"
+    }
+
+    def request(url: str) -> str:
+        response = httpx.get(url, headers=headers, timeout=timeout_seconds, follow_redirects=True)
+        if response.status_code >= 400:
+            raise NewsDataRequestError(f"Archivo público respondió HTTP {response.status_code}: {url}")
+        return response.text
+
+    return request
+
+
 def collect_candidates(
     config: Mapping[str, Any],
     *,
     api_key: str,
     run_id: str,
     request_json: RequestJSON,
+    request_html: RequestHTML | None = None,
     seeded_rows: Iterable[Mapping[str, Any]] = (),
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -303,6 +431,7 @@ def collect_candidates(
     errors: list[dict[str, str]] = []
     per_source: dict[str, dict[str, Any]] = {}
     total_requests = 0
+    archive_requests_total = 0
     rate_limited = False
     request_budget_exhausted = False
 
@@ -310,6 +439,45 @@ def collect_candidates(
         selected = dict(seeded_by_source[source_id])
         requests_made = 0
         source_status = "completed"
+        discovery = str(source.get("discovery", "newsdata"))
+        if discovery == "archive":
+            if request_html is None:
+                raise NewsDataConfigurationError("Se requiere request_html para una fuente de archivo público")
+            for archive_url in source.get("archive_urls", []):
+                if len(selected) >= limit:
+                    break
+                requests_made += 1
+                archive_requests_total += 1
+                try:
+                    html = request_html(str(archive_url))
+                except (httpx.HTTPError, NewsDataRequestError) as error:
+                    errors.append({"source_id": source_id, "query": str(archive_url), "error": str(error)})
+                    continue
+                retrieved_at = now().isoformat()
+                for row in archive_candidates_from_html(
+                    html,
+                    archive_url=str(archive_url),
+                    source_id=source_id,
+                    source=source,
+                    run_id=run_id,
+                    retrieved_at=retrieved_at,
+                ):
+                    selected.setdefault(row["canonical_url"], row)
+                    if len(selected) >= limit:
+                        break
+                if delay and len(selected) < limit:
+                    sleep(delay)
+            rows = list(selected.values())[:limit]
+            candidates.extend(rows)
+            per_source[source_id] = {
+                "requested": limit,
+                "collected": len(rows),
+                "shortfall": max(0, limit - len(rows)),
+                "requests_made": requests_made,
+                "seeded": len(seeded_by_source[source_id]),
+                "status": source_status,
+            }
+            continue
         for query in queries:
             if len(selected) >= limit or requests_made >= max_requests:
                 break
@@ -390,6 +558,7 @@ def collect_candidates(
         "errors": errors,
         "seeded_total": sum(len(rows) for rows in seeded_by_source.values()),
         "total_requests": total_requests,
+        "archive_requests_total": archive_requests_total,
         "rate_limited": rate_limited,
         "request_budget_exhausted": request_budget_exhausted,
     }

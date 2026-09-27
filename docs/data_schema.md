@@ -22,7 +22,7 @@ Cada ejecución de 01_collect_newsdata_urls.py crea data/01_candidates/<run_id>.
 | published_at, language, country, category | Fecha y clasificación declaradas por la API. |
 | newsdata_article_id, api_query, retrieved_at | Trazabilidad de la respuesta y de la consulta. |
 
-Los valores permitidos de source_dataset son newsdata_el_comercio, newsdata_rpp, newsdata_latina, newsdata_el_peruano, newsdata_peru21 y newsdata_la_republica.
+Los valores permitidos de source_dataset son newsdata_el_comercio, newsdata_rpp, archive_latina, newsdata_el_peruano, newsdata_peru21 y newsdata_la_republica. `archive_latina` identifica candidatas descubiertas en los archivos públicos de Salud y Medicina de Latina, no artículos obtenidos desde NewsData.
 
 ## 2. Revisión humana
 
