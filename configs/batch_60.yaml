@@ -1,0 +1,55 @@
+# Batch piloto reproducible: 10 candidatas por cada uno de seis medios.
+# El endpoint `latest` recupera noticias recientes (hasta 48 horas, según NewsData).
+batch:
+  name: seminario_1_newsdata_60
+  endpoint: https://newsdata.io/api/1/latest
+  output_dir: data/raw/source_url_runs
+  report_dir: reports/newsdata_runs
+  expected_total: 60
+  per_source_limit: 10
+  language: es
+  country: pe
+  category: health
+  # En cuentas gratuitas NewsData limita los créditos por ventana de 15 minutos.
+  # Se reserva margen para no agotar la ventana durante una sola corrida.
+  request_delay_seconds: 2.0
+  timeout_seconds: 30
+  max_requests_per_source: 10
+  max_requests_total: 28
+  health_queries:
+    - salud
+    - medicina
+    - enfermedad
+    - tratamiento
+    - medicamento
+    - vacuna
+    - síntomas
+    - prevención
+    - cáncer
+    - diabetes
+
+sources:
+  el_comercio:
+    name: El Comercio
+    source_dataset: newsdata_el_comercio
+    domain: elcomercio.pe
+  rpp:
+    name: RPP Noticias
+    source_dataset: newsdata_rpp
+    domain: rpp.pe
+  latina:
+    name: Latina Noticias
+    source_dataset: newsdata_latina
+    domain: latinanoticias.pe
+  el_peruano:
+    name: El Peruano
+    source_dataset: newsdata_el_peruano
+    domain: elperuano.pe
+  peru21:
+    name: Perú21
+    source_dataset: newsdata_peru21
+    domain: peru21.pe
+  la_republica:
+    name: La República
+    source_dataset: newsdata_la_republica
+    domain: larepublica.pe

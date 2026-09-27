@@ -13,22 +13,17 @@ __pycache__/
 checkpoints/
 
 # Datos locales y artefactos generados
+# Los resultados de cada corrida y las revisiones humanas se conservan localmente.
+# No se suben al repositorio ni se mezclan con credenciales.
 data/raw/*
 !data/raw/.gitkeep
-!data/raw/html/
-data/raw/html/*
-!data/raw/html/.gitkeep
-!data/raw/metadata/
-data/raw/metadata/*
-!data/raw/metadata/.gitkeep
-data/interim/*
-!data/interim/.gitkeep
-data/annotations/*
-!data/annotations/.gitkeep
+!data/raw/source_url_runs/
+data/raw/source_url_runs/*
+!data/raw/source_url_runs/.gitkeep
+data/review/*
+!data/review/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
-!data/processed/medical_news_corpus_2026.csv
-!data/processed/medical_news_professor_style_2026.csv
 reports/*
 !reports/.gitkeep
 

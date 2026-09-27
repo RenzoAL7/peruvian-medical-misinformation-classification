@@ -1,73 +1,48 @@
-# Esquema de datos del corpus médico peruano
+# Esquema de datos
 
-## Principio de trazabilidad
+## 1. Candidatas de una corrida
 
-Cada fila conserva su origen, el estado de extracción y la relación con un
-posible duplicado. El texto que eventualmente recibe un modelo será
-`title + subtitle_or_bajada + body`; URL, fuente, fecha y autor siguen siendo
-solo metadatos.
-
-## Corpus consolidado
+Cada ejecución de 01_collect_newsdata_urls.py crea data/raw/source_url_runs/<run_id>.csv. Una fila representa una candidata devuelta por NewsData.io, no una noticia ya validada.
 
 | Campo | Descripción |
 | --- | --- |
-| `record_id` | Identificador estable derivado de la URL canónica. |
-| `source_dataset` | `scraped_rpp`, `scraped_el_comercio` o `scraped_latina`. |
-| `source_name` | Medio o fuente original. |
-| `url`, `canonical_url` | URL recibida y URL sin parámetros de seguimiento. |
-| `retrieved_at`, `published_at` | Recuperación UTC y fecha de publicación normalizada cuando existe. |
-| `title`, `subtitle_or_bajada`, `body` | Texto extraído, sin usarlo para etiquetar automáticamente. |
-| `author`, `section`, `language` | Metadatos de autoría, sección e idioma detectado. |
-| `http_status` | Código HTTP observado durante la descarga. |
-| `scraping_method` | `trafilatura` o `beautifulsoup_fallback`. |
-| `raw_html_path` | Ruta local a una versión de la captura HTML original. |
-| `content_hash`, `normalized_content_hash` | SHA-256 del texto original y normalizado. |
-| `normalized_text` | Texto NFKC con espacios normalizados y tildes/negaciones conservadas. |
-| `extraction_status` | `valid`, `needs_review`, `excluded` o `error`. |
-| `exclusion_reason` | Motivo verificable de exclusión, revisión o error. |
-| `duplicate_status` | `unique`, `exact_url`, `exact_content` o `near_duplicate`. |
-| `duplicate_of_record_id`, `duplicate_similarity` | Registro de referencia y similitud cuando corresponde. |
-| `run_id` | Identificador de la corrida de descubrimiento o extracción. |
+| run_id, seeded_from_run_id | Identificador de la corrida actual y, si aplica, de la corrida parcial de la que se conservó la candidata. |
+| record_id | Hash corto y estable de la URL canónica. |
+| source_dataset, source_id, source_name, source_domain | Procedencia configurada. |
+| url, canonical_url | Enlace recibido y versión sin parámetros de seguimiento. |
+| title, description, author | Metadatos de texto suministrados por la API. |
+| published_at, language, country, category | Fecha y clasificación declaradas por la API. |
+| newsdata_article_id, api_query, retrieved_at | Trazabilidad de la respuesta y de la consulta. |
 
-## Plantilla de anotación Human-in-the-Loop
+Los valores permitidos de source_dataset son newsdata_el_comercio, newsdata_rpp, newsdata_latina, newsdata_el_peruano, newsdata_peru21 y newsdata_la_republica.
 
-Además de los campos del corpus, contiene:
+## 2. Revisión humana
 
-| Campo | Uso |
+02_create_manual_review.py crea data/review/<run_id>_manual_review.csv. Conserva los campos de procedencia y añade los siguientes campos editables.
+
+| Campo | Regla de uso |
 | --- | --- |
-| `main_medical_claim` | Afirmación médica principal delimitada por el revisor. |
-| `evidence_source`, `evidence_url`, `evidence_identifier`, `evidence_excerpt` | Evidencia usada para revisar la afirmación. |
-| `label` | `0`, `1` o `EXCLUIDA`; queda vacío hasta la revisión humana. |
-| `label_reason` | Razón breve y auditable de la decisión. |
-| `reviewer_1`, `reviewer_2`, `review_status` | Doble revisión y estado del caso. |
-| `disagreement` | Desacuerdo y resolución por consenso. |
-| `reviewed_at` | Fecha de revisión. |
+| is_medical | SI cuando el investigador confirma que el caso trata una afirmación de salud/medicina; NO en caso contrario. |
+| medical_relevance_reason | Breve razón de inclusión o descarte temático. |
+| body | Cuerpo de la noticia obtenido y pegado por el investigador. |
+| main_medical_claim | Una afirmación médica verificable delimitada manualmente. |
+| evidence_source, evidence_url, evidence_excerpt | Fuente, enlace y fragmento que respaldan el contraste. |
+| label | 0, 1 o EXCLUIDA; nunca se llena a partir del medio. |
+| label_reason | Razón concisa que conecta afirmación y evidencia. |
+| reviewer, review_status, reviewed_at | Responsable, estado y fecha de la revisión. |
 
-Los registros duplicados o no válidos se preservan en el corpus y no pasan por
-defecto a la plantilla de anotación.
+La hoja se debe conservar como CSV UTF-8. La revisión final debe usar review_status=COMPLETADA.
 
-## Vista CSV con columnas del profesor
+## 3. Corpus binario real
 
-`data/processed/medical_news_professor_style_2026.csv` es una vista derivada
-para trabajar en una hoja simple. Tiene una fila por noticia y estas columnas:
+03_export_training_csv.py filtra el CSV manual y crea data/processed/training_corpus_real.csv con las columnas siguientes:
 
-| Columna | Origen o regla |
+| Campo | Descripción |
 | --- | --- |
-| `ID` | `record_id` del corpus trazable. |
-| `CATEGORY` | Vacío hasta la revisión humana; nunca se infiere desde la fuente. |
-| `TOPICS` | `Salud`. |
-| `SOURCE`, `Tipo de Fuente` | Medio de origen y `Medio de comunicación`. |
-| `HEADLINE` | Título extraído. |
-| `TEXT` | Bajada y cuerpo, conservando saltos de párrafo. |
-| `LINK`, `Certificado de seguridad` | URL original y `Sí` cuando usa HTTPS. |
-| `Fecha`, `Hora`, `Autor` | Fecha/hora de publicación y autor cuando se extrajeron. |
+| record_id | Identificador de la candidata original. |
+| text | Concatenación normalizada de título, bajada y cuerpo. |
+| label | Solo 0 o 1. |
+| source_dataset, source_name, url, published_at | Metadatos para auditoría, no variables del modelo. |
+| is_synthetic | false en esta fase. |
 
-El CSV trazable sigue siendo la fuente de verdad para URL canónica, HTML,
-hashes, estado de extracción, duplicados y revisión de evidencia.
-
-## Resumen de la corrida
-
-`reports/collection_summary.json` informa los conteos por `source_dataset`, los
-registros válidos únicos, estados de duplicación, errores, exclusiones y la
-cantidad de valores faltantes por campo trazable. Así las ausencias causadas por
-una extracción se registran sin inventar valores.
+Una fila SI solo entra al corpus final si tiene cuerpo, afirmación principal, fuente y URL de evidencia, razón de etiqueta, estado COMPLETADA y etiqueta binaria. Se eliminan duplicados exactos por URL canónica o texto normalizado al exportar. Las filas NO y EXCLUIDA permanecen en la hoja de revisión, pero no ingresan al CSV de entrenamiento.

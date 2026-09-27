@@ -1,35 +1,13 @@
-# Organización de datos
+# Datos locales del corpus
 
-El corpus reúne noticias médicas en español de El Comercio, RPP Noticias y
-Latina Noticias. El archivo compartido para la tesis es:
+El repositorio conserva la estructura, los scripts y la documentación. Los resultados de cada corrida se almacenan localmente y se ignoran por Git. No se usa Parquet en esta entrega.
 
-```text
-data/processed/medical_news_corpus_2026.csv
-```
+    data/
+    ├── raw/
+    │   └── source_url_runs/       # una candidata por URL/título de cada corrida
+    ├── review/                    # CSV que se completa manualmente en Excel
+    └── processed/                 # CSV binario real tras la revisión
 
-Contiene 154 registros con título, bajada, cuerpo, URL, fecha, fuente, estado
-de extracción, hashes, rutas de HTML y campos vacíos para revisión humana. Se
-versiona únicamente en este repositorio privado del equipo. No existe una
-versión Parquet.
+El primer CSV se genera con NewsData.io y contiene metadatos de descubrimiento; no contiene cuerpos verificados ni etiquetas. La plantilla de review añade is_medical, body, afirmación médica, evidencia, etiqueta y estado de revisión. processed/training_corpus_real.csv se crea solo cuando las filas cumplen los controles de revisión manual.
 
-`medical_news_professor_style_2026.csv` es una vista derivada del mismo corpus
-con las 12 columnas de la hoja del profesor. Sirve para revisión manual y no
-reemplaza el CSV trazable; `CATEGORY` se mantiene vacío hasta la anotación.
-
-```text
-data/
-├── raw/          # HTML original y manifiestos locales; ignorados por Git
-├── interim/      # JSONL y logs de extracción; ignorados por Git
-├── annotations/  # copias de trabajo para revisión humana; ignoradas por Git
-└── processed/    # corpus CSV privado y, luego, dataset binario etiquetado
-```
-
-Las etiquetas finales serán `0` (no desinformación) o `1` (desinformación).
-`EXCLUIDA` se utiliza en la revisión para afirmaciones ambiguas, contradictorias
-o no verificables, y no entra al conjunto de entrenamiento. La fuente no decide
-la etiqueta.
-
-El texto de entrada previsto es `title + subtitle_or_bajada + body`. Las URLs,
-fuentes, fechas, evidencia y notas de revisión son metadatos de trazabilidad,
-no características del modelo. No se entrena hasta completar la revisión humana
-y la deduplicación.
+Las etiquetas son 0 (compatible con la evidencia), 1 (contradicha por la evidencia) y EXCLUIDA (no verificable, ambigua o no separable). EXCLUIDA no entra al CSV binario final. El medio, URL y fecha nunca determinan la etiqueta.
