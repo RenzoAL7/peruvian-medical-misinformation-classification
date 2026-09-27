@@ -1,0 +1,123 @@
+# Batch piloto reproducible: 2 candidatas por cada uno de seis medios.
+# El endpoint `latest` recupera noticias recientes (hasta 48 horas, según NewsData).
+batch:
+  name: seminario_1_newsdata_12
+  endpoint: https://newsdata.io/api/1/latest
+  output_dir: data/01_candidates
+  report_dir: reports/runs
+  run_registry_path: data/00_control/run_registry.csv
+  expected_total: 12
+  per_source_limit: 2
+  language: es
+  country: pe
+  category: health
+  # En cuentas gratuitas NewsData limita los créditos por ventana de 15 minutos.
+  # Se reserva margen para no agotar la ventana durante una sola corrida.
+  request_delay_seconds: 2.0
+  timeout_seconds: 30
+  max_requests_per_source: 6
+  max_requests_total: 20
+  health_queries:
+    - salud
+    - medicina
+    - enfermedad
+    - tratamiento
+    - medicamento
+    - vacuna
+    - síntomas
+    - prevención
+    - cáncer
+    - diabetes
+
+sources:
+  el_comercio:
+    name: El Comercio
+    source_dataset: newsdata_el_comercio
+    domain: elcomercio.pe
+  rpp:
+    name: RPP Noticias
+    source_dataset: newsdata_rpp
+    domain: rpp.pe
+  latina:
+    name: Latina Noticias
+    # NewsData no cataloga de forma fiable este dominio. Las candidatas se
+    # descubren desde dos archivos públicos permitidos por robots.txt.
+    source_dataset: archive_latina
+    domain: latinanoticias.pe
+    discovery: archive
+    newsdata_fallback: true
+    # Alias aceptado por NewsData; solo se usa si el archivo público no entrega 2 URLs.
+    newsdata_domain: latina.pe
+    newsdata_source_dataset: newsdata_latina
+    archive_urls:
+      - https://latinanoticias.pe/noticias-sobre/salud/
+      - https://latinanoticias.pe/noticias-sobre/medicina/
+    # Filtro de descubrimiento, no de veracidad ni de pertinencia final.
+    candidate_keywords:
+      - salud
+      - medicina
+      - médico
+      - medicos
+      - enfermedad
+      - tratamiento
+      - medicamento
+      - vacuna
+      - cáncer
+      - cancer
+      - diabetes
+      - hospital
+      - essalud
+      - minsa
+      - oncólogo
+      - oncologo
+      - fisioterapia
+      - órganos
+      - organos
+  el_peruano:
+    name: El Peruano
+    source_dataset: newsdata_el_peruano
+    domain: elperuano.pe
+  peru21:
+    name: Perú21
+    # NewsData puede no tener resultados recientes de Perú21. Se recurre a su
+    # archivo público de Salud y a una segunda página permitida por robots.txt.
+    source_dataset: archive_peru21
+    domain: peru21.pe
+    discovery: archive
+    newsdata_fallback: true
+    newsdata_source_dataset: newsdata_peru21
+    archive_urls:
+      - https://peru21.pe/noticias/salud/
+      - https://peru21.pe/noticias/salud/2/
+    article_link_selector: "div.view-content article.node--type-article a[href]"
+    # El selector ya limita enlaces a tarjetas de artículos; Perú21 publica
+    # noticias de Salud bajo varias secciones (vida, lima, peru, opinión).
+    allow_selected_article_urls: true
+    candidate_keywords:
+      - salud
+      - medicina
+      - médico
+      - medicos
+      - enfermedad
+      - tratamiento
+      - medicamento
+      - vacuna
+      - cáncer
+      - cancer
+      - diabetes
+      - hígado
+      - higado
+      - hospital
+      - essalud
+      - minsa
+      - síntomas
+      - sintomas
+      - prevención
+      - prevencion
+      - virus
+      - migraña
+      - migrana
+  la_republica:
+    name: La República
+    source_dataset: newsdata_la_republica
+    domain: larepublica.pe
