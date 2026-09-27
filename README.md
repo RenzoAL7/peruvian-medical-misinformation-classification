@@ -81,6 +81,7 @@ Reemplaza <run_id> por el nombre generado en el paso anterior.
 Completa en Excel y guarda como CSV UTF-8:
 
     is_medical
+    is_claim_eligible
     body
     main_medical_claim
     evidence_source
@@ -93,7 +94,7 @@ Completa en Excel y guarda como CSV UTF-8:
 
     make export REVIEW=data/02_review/<run_id>_manual_review.csv
 
-El resultado queda en data/03_processed/training_corpus_real.csv. Solo exporta filas médicas completadas, con evidencia documentada y etiqueta 0 o 1.
+El resultado queda en data/03_processed/training_corpus_real.csv. Solo exporta filas médicas con una afirmación verificable (`is_claim_eligible=SI`), completadas, con evidencia documentada y etiqueta 0 o 1. Las notas administrativas, campañas, acceso a servicios o casos sociales se marcan `is_claim_eligible=NO` y no ingresan al corpus.
 
 ## Límites del flujo
 

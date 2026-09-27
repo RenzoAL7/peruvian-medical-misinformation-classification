@@ -28,6 +28,7 @@ REVIEW_COLUMNS = [
     "retrieved_at",
     "is_medical",
     "medical_relevance_reason",
+    "is_claim_eligible",
     "body",
     "main_medical_claim",
     "evidence_source",
@@ -60,6 +61,7 @@ def review_rows(candidates: Iterable[Mapping[str, object]]) -> list[dict[str, st
         row.update(
             is_medical="PENDIENTE",
             medical_relevance_reason="",
+            is_claim_eligible="PENDIENTE",
             body="",
             main_medical_claim="",
             evidence_source="",
@@ -122,6 +124,11 @@ def review_to_training_rows(table: pd.DataFrame) -> tuple[list[dict[str, str]], 
             continue
         if not _yes(row["is_medical"]):
             errors.append(f"Fila {row_number}: completa is_medical con SI o NO")
+            continue
+        if _no(row["is_claim_eligible"]):
+            continue
+        if not _yes(row["is_claim_eligible"]):
+            errors.append(f"Fila {row_number}: is_medical=SI requiere is_claim_eligible con SI o NO")
             continue
         label = str(row["label"]).strip()
         if label == "EXCLUIDA":

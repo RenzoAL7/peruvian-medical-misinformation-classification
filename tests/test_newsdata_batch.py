@@ -301,7 +301,8 @@ def test_review_export_only_keeps_complete_binary_human_review() -> None:
         },
     ]
     table = pd.DataFrame(review_rows(candidates))
-    table.loc[0, ["is_medical", "body", "main_medical_claim"]] = [
+    table.loc[0, ["is_medical", "is_claim_eligible", "body", "main_medical_claim"]] = [
+        "SI",
         "SI",
         "Cuerpo de la noticia.",
         "La afirmación médica principal.",
@@ -330,3 +331,27 @@ def test_review_export_only_keeps_complete_binary_human_review() -> None:
             "is_synthetic": "false",
         }
     ]
+
+
+def test_review_export_excludes_medical_news_without_eligible_claim() -> None:
+    candidates = [
+        {
+            "record_id": "administrative",
+            "source_dataset": "archive_latina",
+            "source_name": "Latina Noticias",
+            "url": "https://latinanoticias.pe/lima/campana_20260901/",
+            "title": "Municipio realizará campaña contra el dengue",
+        }
+    ]
+    table = pd.DataFrame(review_rows(candidates))
+    table.loc[0, ["is_medical", "is_claim_eligible", "review_status", "label"]] = [
+        "SI",
+        "NO",
+        "COMPLETADA",
+        "EXCLUIDA",
+    ]
+
+    rows, errors = review_to_training_rows(table)
+
+    assert rows == []
+    assert errors == []

@@ -32,6 +32,7 @@ Los valores permitidos de source_dataset son newsdata_el_comercio, newsdata_rpp,
 | --- | --- |
 | is_medical | SI cuando el investigador confirma que el caso trata una afirmación de salud/medicina; NO en caso contrario. |
 | medical_relevance_reason | Breve razón de inclusión o descarte temático. |
+| is_claim_eligible | SI únicamente si el texto contiene una afirmación médica principal, concreta y contrastable; NO para campañas, inspecciones, anuncios institucionales, infraestructura, acceso a servicios, casos policiales o relatos sin una afirmación verificable. |
 | body | Cuerpo de la noticia obtenido y pegado por el investigador. |
 | main_medical_claim | Una afirmación médica verificable delimitada manualmente. |
 | evidence_source, evidence_url, evidence_excerpt | Fuente, enlace y fragmento que respaldan el contraste. |
@@ -53,4 +54,4 @@ La hoja se debe conservar como CSV UTF-8. La revisión final debe usar review_st
 | source_dataset, source_name, url, published_at | Metadatos para auditoría, no variables del modelo. |
 | is_synthetic | false en esta fase. |
 
-Una fila SI solo entra al corpus final si tiene cuerpo, afirmación principal, fuente y URL de evidencia, razón de etiqueta, estado COMPLETADA y etiqueta binaria. Se eliminan duplicados exactos por URL canónica o texto normalizado al exportar. Las filas NO y EXCLUIDA permanecen en la hoja de revisión, pero no ingresan al CSV de entrenamiento.
+Una fila solo entra al corpus final si `is_medical=SI` e `is_claim_eligible=SI`, además de tener cuerpo, afirmación principal, fuente y URL de evidencia, razón de etiqueta, estado COMPLETADA y etiqueta binaria. Se eliminan duplicados exactos por URL canónica o texto normalizado al exportar. Las filas con cualquiera de esos campos en NO y las EXCLUIDA permanecen en la hoja de revisión, pero no ingresan al CSV de entrenamiento.

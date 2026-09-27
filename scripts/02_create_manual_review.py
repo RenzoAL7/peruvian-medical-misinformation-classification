@@ -43,7 +43,7 @@ def main() -> int:
     rows = review_rows(candidates.to_dict(orient="records"))
     write_review_csv(output, rows)
     print(f"Plantilla manual creada con {len(rows)} filas: {output}")
-    print("Completa is_medical, body, evidencia, etiqueta y estado de revisión en Excel y guárdala como CSV UTF-8.")
+    print("Completa is_medical, is_claim_eligible, body, evidencia, etiqueta y estado de revisión en Excel y guárdala como CSV UTF-8.")
     return 0
 
 
