@@ -41,8 +41,7 @@ Los CSV generados, reportes y la clave API se guardan localmente y están ignora
 
 ### 1. Instalar
 
-    python3 -m venv .venv
-    .venv/bin/python -m pip install -e '.[dev]'
+    make setup
 
 ### 2. Configurar la clave
 
@@ -52,17 +51,17 @@ Abre .env y escribe la clave en NEWSDATA_API_KEY. No subas ese archivo a Git.
 
 ### 3. Ver el contador de corridas
 
-    .venv/bin/python scripts/00_show_run_history.py
+    make history
 
 ### 4. Verificar el batch sin usar la API
 
-    .venv/bin/python scripts/01_collect_newsdata_urls.py --dry-run
+    make plan
 
 Debe indicar: 12 candidatas = 2 por cada una de 6 fuentes.
 
 ### 5. Ejecutar una corrida real
 
-    .venv/bin/python scripts/01_collect_newsdata_urls.py
+    make run
 
 El script crea automáticamente un identificador como run_002_20260927T.... El número aumenta una vez por cada ejecución real y se registra en data/00_control/run_registry.csv.
 
@@ -77,8 +76,7 @@ Si una fuente no tiene resultados recientes o NewsData limita temporalmente la c
 
 Reemplaza <run_id> por el nombre generado en el paso anterior.
 
-    .venv/bin/python scripts/02_create_manual_review.py \
-      --input data/01_candidates/<run_id>.csv
+    make review RUN_ID=<run_id>
 
 Completa en Excel y guarda como CSV UTF-8:
 
@@ -93,8 +91,7 @@ Completa en Excel y guarda como CSV UTF-8:
 
 ### 7. Exportar el corpus real binario
 
-    .venv/bin/python scripts/03_export_training_csv.py \
-      --input data/02_review/<run_id>_manual_review.csv
+    make export REVIEW=data/02_review/<run_id>_manual_review.csv
 
 El resultado queda en data/03_processed/training_corpus_real.csv. Solo exporta filas médicas completadas, con evidencia documentada y etiqueta 0 o 1.
 
@@ -104,7 +101,10 @@ La API descubre candidatas; la persona investigadora decide si la noticia es mé
 
 Para retomar una corrida parcial después de que NewsData restablezca su cuota:
 
-    .venv/bin/python scripts/01_collect_newsdata_urls.py \
-      --resume-from data/01_candidates/<run_id_anterior>.csv
+    make resume FROM=data/01_candidates/<run_id_anterior>.csv
 
 El nuevo archivo conserva las candidatas previas y busca solo los faltantes por medio.
+
+Para ver todos los comandos disponibles:
+
+    make help
