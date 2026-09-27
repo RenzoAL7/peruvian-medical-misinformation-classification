@@ -14,12 +14,16 @@ from pathlib import Path
 
 from peruvian_medical_misinformation.newsdata import (
     NewsDataConfigurationError,
+    append_run_registry,
     api_key_from_environment,
     collect_candidates,
     httpx_json_request,
     load_local_env,
     load_yaml,
+    next_run_number,
     read_candidates,
+    read_run_registry,
+    run_status,
     validate_batch_config,
     write_candidates,
     write_summary,
@@ -38,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
-        default="configs/batch_60.yaml",
+        default="configs/batch_12.yaml",
         help="Configuración YAML relativa al repositorio.",
     )
     parser.add_argument(
@@ -46,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         default=".env",
         help="Archivo local con NEWSDATA_API_KEY. No se versiona.",
     )
-    parser.add_argument("--run-id", help="Identificador de corrida reproducible.")
+    parser.add_argument("--run-id", help="Identificador opcional; por defecto usa el contador local.")
     parser.add_argument(
         "--resume-from",
         help="CSV de una corrida parcial para completar solo los faltantes por fuente.",
@@ -64,10 +68,13 @@ def main() -> int:
     config_path = project_path(args.config)
     config = load_yaml(config_path)
     batch, sources = validate_batch_config(config)
+    registry_path = project_path(batch["run_registry_path"])
+    run_number = next_run_number(read_run_registry(registry_path))
 
     seeded_rows = read_candidates(project_path(args.resume_from)) if args.resume_from else []
 
     if args.dry_run:
+        print(f"Siguiente corrida registrada: #{run_number}")
         print(
             "Configuración válida: "
             f"{batch['expected_total']} candidatas = "
@@ -80,7 +87,7 @@ def main() -> int:
 
     load_local_env(project_path(args.env_file))
     api_key = api_key_from_environment()
-    run_id = args.run_id or datetime.now(timezone.utc).strftime("newsdata_%Y%m%dT%H%M%SZ")
+    run_id = args.run_id or f"run_{run_number:03d}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
     rows, summary = collect_candidates(
         config,
@@ -91,14 +98,39 @@ def main() -> int:
     )
     summary["config_path"] = str(config_path.relative_to(REPOSITORY_ROOT))
     summary["executed_at"] = datetime.now(timezone.utc).isoformat()
+    summary["run_number"] = run_number
     if args.resume_from:
         summary["resumed_from"] = str(project_path(args.resume_from).relative_to(REPOSITORY_ROOT))
 
     candidates_path = project_path(batch["output_dir"]) / f"{run_id}.csv"
     summary_path = project_path(batch["report_dir"]) / f"{run_id}.json"
+    if candidates_path.exists() or summary_path.exists():
+        raise NewsDataConfigurationError(
+            f"La corrida '{run_id}' ya existe. Elige otro --run-id para no sobrescribir resultados."
+        )
     write_candidates(candidates_path, rows)
     write_summary(summary_path, summary)
+    append_run_registry(
+        registry_path,
+        {
+            "run_number": run_number,
+            "run_id": run_id,
+            "executed_at": summary["executed_at"],
+            "status": run_status(summary),
+            "expected_total": summary["expected_total"],
+            "collected_total": summary["collected_total"],
+            "shortfall_total": summary["shortfall_total"],
+            "total_requests": summary["total_requests"],
+            "rate_limited": summary["rate_limited"],
+            "request_budget_exhausted": summary["request_budget_exhausted"],
+            "seeded_total": summary["seeded_total"],
+            "candidates_path": candidates_path.relative_to(REPOSITORY_ROOT),
+            "summary_path": summary_path.relative_to(REPOSITORY_ROOT),
+            "resumed_from": summary.get("resumed_from", ""),
+        },
+    )
 
+    print(f"Corrida #{run_number}: {run_id}")
     print(f"Candidatas guardadas: {len(rows)}/{batch['expected_total']} en {candidates_path}")
     if summary["seeded_total"]:
         print(f"Candidatas conservadas desde una corrida previa: {summary['seeded_total']}")

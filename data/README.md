@@ -1,13 +1,21 @@
-# Datos locales del corpus
+# Organización de datos
 
-El repositorio conserva la estructura, los scripts y la documentación. Los resultados de cada corrida se almacenan localmente y se ignoran por Git. No se usa Parquet en esta entrega.
+Las carpetas siguen el orden real del proceso y cada archivo de salida se conserva localmente.
 
     data/
-    ├── raw/
-    │   └── source_url_runs/       # una candidata por URL/título de cada corrida
-    ├── review/                    # CSV que se completa manualmente en Excel
-    └── processed/                 # CSV binario real tras la revisión
+    ├── 00_control/
+    │   └── run_registry.csv
+    │       Historial: número, identificador, estado y cantidad obtenida por corrida.
+    ├── 01_candidates/
+    │   └── <run_id>.csv
+    │       URLs y metadatos devueltos por NewsData.io.
+    ├── 02_review/
+    │   └── <run_id>_manual_review.csv
+    │       Hoja que el investigador completa en Excel.
+    └── 03_processed/
+        └── training_corpus_real.csv
+        Corpus binario real generado después de la revisión.
 
-El primer CSV se genera con NewsData.io y contiene metadatos de descubrimiento; no contiene cuerpos verificados ni etiquetas. La plantilla de review añade is_medical, body, afirmación médica, evidencia, etiqueta y estado de revisión. processed/training_corpus_real.csv se crea solo cuando las filas cumplen los controles de revisión manual.
+El contador registra tanto corridas completas como parciales. Una corrida parcial no se borra: permite reanudar la búsqueda sin perder las URLs ya obtenidas.
 
-Las etiquetas son 0 (compatible con la evidencia), 1 (contradicha por la evidencia) y EXCLUIDA (no verificable, ambigua o no separable). EXCLUIDA no entra al CSV binario final. El medio, URL y fecha nunca determinan la etiqueta.
+No se usa Parquet. Las etiquetas son 0 (compatible con evidencia), 1 (contradicha por evidencia) y EXCLUIDA (no verificable, ambigua o no separable). EXCLUIDA y las noticias no médicas no ingresan al CSV binario final.

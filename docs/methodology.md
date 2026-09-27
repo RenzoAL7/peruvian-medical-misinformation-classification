@@ -6,7 +6,7 @@ La primera entrega construye un flujo reproducible para reunir y revisar noticia
 
 ## Adquisición por lotes
 
-La configuración configs/batch_60.yaml define un batch de 60 candidatas: 10 por cada uno de seis medios peruanos (elcomercio.pe, rpp.pe, latinanoticias.pe, elperuano.pe, peru21.pe y larepublica.pe). El script consulta el endpoint latest de NewsData.io con filtros de dominio, idioma español, país Perú, categoría de salud y términos médicos en español. Conserva el identificador de corrida, consulta, fecha de recuperación, URL original y URL canónica. La API puede devolver menos de diez resultados para una fuente durante su ventana reciente; el sistema registra el faltante y no lo rellena con URLs de otro medio ni con datos fabricados.
+La configuración configs/batch_12.yaml define un batch de 12 candidatas: 2 por cada uno de seis medios peruanos (elcomercio.pe, rpp.pe, latinanoticias.pe, elperuano.pe, peru21.pe y larepublica.pe). El script consulta el endpoint latest de NewsData.io con filtros de dominio, idioma español, país Perú, categoría de salud y términos médicos en español. Conserva el identificador de corrida, consulta, fecha de recuperación, URL original y URL canónica. La API puede devolver menos de dos resultados para una fuente durante su ventana reciente; el sistema registra el faltante y no lo rellena con URLs de otro medio ni con datos fabricados.
 
 La corrida limita sus solicitudes totales y se detiene ante una respuesta 429. Esto respeta la cuota del proveedor y evita insistir sobre un límite temporal. Cuando una corrida queda parcial, el parámetro --resume-from conserva sus URLs válidas, marca su run_id de origen y solicita únicamente las candidatas faltantes en una ejecución posterior.
 

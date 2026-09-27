@@ -42,6 +42,23 @@ CANDIDATE_FIELDS = [
     "retrieved_at",
 ]
 
+RUN_REGISTRY_FIELDS = [
+    "run_number",
+    "run_id",
+    "executed_at",
+    "status",
+    "expected_total",
+    "collected_total",
+    "shortfall_total",
+    "total_requests",
+    "rate_limited",
+    "request_budget_exhausted",
+    "seeded_total",
+    "candidates_path",
+    "summary_path",
+    "resumed_from",
+]
+
 TRACKING_PARAMETERS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 
 
@@ -407,3 +424,46 @@ def write_summary(path: str | Path, summary: Mapping[str, Any]) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def read_run_registry(path: str | Path) -> list[dict[str, str]]:
+    """Lee el historial local de corridas; un registro ausente equivale a cero corridas."""
+
+    registry = Path(path)
+    if not registry.exists():
+        return []
+    with registry.open(newline="", encoding="utf-8") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
+
+
+def next_run_number(rows: Iterable[Mapping[str, str]]) -> int:
+    numbers = []
+    for row in rows:
+        try:
+            numbers.append(int(str(row.get("run_number") or "")))
+        except ValueError:
+            continue
+    return max(numbers, default=0) + 1
+
+
+def run_status(summary: Mapping[str, Any]) -> str:
+    if bool(summary.get("rate_limited")):
+        return "partial_rate_limited"
+    if int(summary.get("collected_total", 0)) == int(summary.get("expected_total", 0)):
+        return "complete"
+    if bool(summary.get("request_budget_exhausted")):
+        return "partial_request_budget"
+    return "partial_no_results"
+
+
+def append_run_registry(path: str | Path, row: Mapping[str, object]) -> None:
+    """Agrega una corrida ya terminada al contador local sin sobrescribir el historial."""
+
+    registry = Path(path)
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not registry.exists() or registry.stat().st_size == 0
+    with registry.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=RUN_REGISTRY_FIELDS, lineterminator="\n")
+        if write_header:
+            writer.writeheader()
+        writer.writerow({field: row.get(field, "") for field in RUN_REGISTRY_FIELDS})

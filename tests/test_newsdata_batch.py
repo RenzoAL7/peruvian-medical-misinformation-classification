@@ -4,7 +4,14 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from peruvian_medical_misinformation.newsdata import NewsDataRateLimitError, collect_candidates
+from peruvian_medical_misinformation.newsdata import (
+    NewsDataRateLimitError,
+    append_run_registry,
+    collect_candidates,
+    next_run_number,
+    read_run_registry,
+    run_status,
+)
 from peruvian_medical_misinformation.review import review_rows, review_to_training_rows
 
 
@@ -139,6 +146,37 @@ def test_collect_candidates_resumes_from_existing_source_rows() -> None:
     ]
     assert next(row for row in rows if row["title"] == "Uno")["seeded_from_run_id"] == "older"
     assert summary["seeded_total"] == 1
+
+
+def test_run_registry_counts_completed_and_partial_runs(tmp_path) -> None:
+    registry = tmp_path / "run_registry.csv"
+    append_run_registry(
+        registry,
+        {
+            "run_number": 1,
+            "run_id": "run_001",
+            "expected_total": 12,
+            "collected_total": 12,
+            "status": "complete",
+        },
+    )
+    append_run_registry(
+        registry,
+        {
+            "run_number": 2,
+            "run_id": "run_002",
+            "expected_total": 12,
+            "collected_total": 7,
+            "status": "partial_no_results",
+        },
+    )
+
+    rows = read_run_registry(registry)
+
+    assert len(rows) == 2
+    assert next_run_number(rows) == 3
+    assert run_status({"expected_total": 12, "collected_total": 12}) == "complete"
+    assert run_status({"expected_total": 12, "collected_total": 7}) == "partial_no_results"
 
 
 def test_review_export_only_keeps_complete_binary_human_review() -> None:

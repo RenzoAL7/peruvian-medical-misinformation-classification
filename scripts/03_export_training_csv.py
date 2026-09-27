@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="CSV UTF-8 de revisión manual completado.")
     parser.add_argument(
         "--output",
-        default="data/processed/training_corpus_real.csv",
+        default="data/03_processed/training_corpus_real.csv",
         help="CSV binario de noticias reales para la futura fase de entrenamiento.",
     )
     return parser.parse_args()

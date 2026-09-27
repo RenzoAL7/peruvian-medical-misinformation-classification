@@ -1,8 +1,16 @@
 # Esquema de datos
 
+## 0. Contador de corridas
+
+data/00_control/run_registry.csv agrega una fila por cada ejecución real. Sus
+campos principales son `run_number`, `run_id`, `executed_at`, `status`,
+`expected_total`, `collected_total`, `shortfall_total`, `total_requests`, rutas
+del CSV y del reporte. El contador aumenta aunque la API deje una corrida
+parcial, para no perder trazabilidad.
+
 ## 1. Candidatas de una corrida
 
-Cada ejecución de 01_collect_newsdata_urls.py crea data/raw/source_url_runs/<run_id>.csv. Una fila representa una candidata devuelta por NewsData.io, no una noticia ya validada.
+Cada ejecución de 01_collect_newsdata_urls.py crea data/01_candidates/<run_id>.csv. Una fila representa una candidata devuelta por NewsData.io, no una noticia ya validada.
 
 | Campo | Descripción |
 | --- | --- |
@@ -18,7 +26,7 @@ Los valores permitidos de source_dataset son newsdata_el_comercio, newsdata_rpp,
 
 ## 2. Revisión humana
 
-02_create_manual_review.py crea data/review/<run_id>_manual_review.csv. Conserva los campos de procedencia y añade los siguientes campos editables.
+02_create_manual_review.py crea data/02_review/<run_id>_manual_review.csv. Conserva los campos de procedencia y añade los siguientes campos editables.
 
 | Campo | Regla de uso |
 | --- | --- |
@@ -35,7 +43,7 @@ La hoja se debe conservar como CSV UTF-8. La revisión final debe usar review_st
 
 ## 3. Corpus binario real
 
-03_export_training_csv.py filtra el CSV manual y crea data/processed/training_corpus_real.csv con las columnas siguientes:
+03_export_training_csv.py filtra el CSV manual y crea data/03_processed/training_corpus_real.csv con las columnas siguientes:
 
 | Campo | Descripción |
 | --- | --- |

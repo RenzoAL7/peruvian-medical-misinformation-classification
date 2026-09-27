@@ -38,7 +38,7 @@ def main() -> int:
     output = (
         project_path(args.output)
         if args.output
-        else REPOSITORY_ROOT / "data/review" / f"{candidates_path.stem}_manual_review.csv"
+        else REPOSITORY_ROOT / "data/02_review" / f"{candidates_path.stem}_manual_review.csv"
     )
     rows = review_rows(candidates.to_dict(orient="records"))
     write_review_csv(output, rows)

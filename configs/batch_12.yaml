@@ -1,12 +1,13 @@
-# Batch piloto reproducible: 10 candidatas por cada uno de seis medios.
+# Batch piloto reproducible: 2 candidatas por cada uno de seis medios.
 # El endpoint `latest` recupera noticias recientes (hasta 48 horas, según NewsData).
 batch:
-  name: seminario_1_newsdata_60
+  name: seminario_1_newsdata_12
   endpoint: https://newsdata.io/api/1/latest
-  output_dir: data/raw/source_url_runs
-  report_dir: reports/newsdata_runs
-  expected_total: 60
-  per_source_limit: 10
+  output_dir: data/01_candidates
+  report_dir: reports/runs
+  run_registry_path: data/00_control/run_registry.csv
+  expected_total: 12
+  per_source_limit: 2
   language: es
   country: pe
   category: health
@@ -14,8 +15,8 @@ batch:
   # Se reserva margen para no agotar la ventana durante una sola corrida.
   request_delay_seconds: 2.0
   timeout_seconds: 30
-  max_requests_per_source: 10
-  max_requests_total: 28
+  max_requests_per_source: 6
+  max_requests_total: 20
   health_queries:
     - salud
     - medicina
