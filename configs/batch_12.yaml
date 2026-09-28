@@ -15,15 +15,18 @@ batch:
   # Se reserva margen para no agotar la ventana durante una sola corrida.
   request_delay_seconds: 2.0
   timeout_seconds: 30
-  # Se permiten los diez temas; el presupuesto global sigue evitando una
-  # corrida ilimitada y ahora se reparte por rondas entre los medios.
+  # Las dos primeras consultas agrupan los diez temas para aprovechar mejor
+  # cada credito. Si no bastan, se prueban los temas individuales rotados.
   max_requests_per_source: 10
-  max_requests_total: 20
+  max_requests_total: 30
+  priority_query_count: 2
   # Recupera hasta 10 resultados por crédito y conserva solo candidatas nuevas.
   # Si una respuesta contiene record_id ya presentes en la hoja, continúa con
   # la siguiente consulta médica de esta lista.
   results_per_request: 10
   health_queries:
+    - (salud OR medicina OR enfermedad OR tratamiento OR medicamento)
+    - (vacuna OR síntomas OR prevención OR cáncer OR diabetes)
     - salud
     - medicina
     - enfermedad

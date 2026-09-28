@@ -436,8 +436,19 @@ def collect_candidates(
     configured_queries = [str(value).strip() for value in batch["health_queries"] if str(value).strip()]
     if not configured_queries:
         raise NewsDataConfigurationError("health_queries debe contener al menos una consulta")
-    normalized_offset = int(query_offset) % len(configured_queries)
-    queries = configured_queries[normalized_offset:] + configured_queries[:normalized_offset]
+    priority_query_count = int(batch.get("priority_query_count", 0))
+    if priority_query_count < 0 or priority_query_count > len(configured_queries):
+        raise NewsDataConfigurationError(
+            "priority_query_count debe estar entre 0 y la cantidad de health_queries"
+        )
+    priority_queries = configured_queries[:priority_query_count]
+    rotating_queries = configured_queries[priority_query_count:]
+    normalized_offset = int(query_offset) % len(rotating_queries) if rotating_queries else 0
+    queries = (
+        priority_queries
+        + rotating_queries[normalized_offset:]
+        + rotating_queries[:normalized_offset]
+    )
     excluded_ids = {str(value).strip() for value in excluded_record_ids if str(value).strip()}
     seeded_by_source: dict[str, dict[str, dict[str, str]]] = {source_id: {} for source_id in sources}
     for item in seeded_rows:
@@ -536,6 +547,7 @@ def collect_candidates(
                 "category": str(batch.get("category", "health")),
                 "q": query,
                 "size": str(results_per_request),
+                "removeduplicate": "1",
             }
             state["api_requests"] += 1
             state["queries_attempted"].append(query)

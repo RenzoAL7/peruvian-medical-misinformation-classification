@@ -13,6 +13,12 @@ def test_batch_12_keeps_the_six_approved_outlets_and_discovery_modes() -> None:
     assert batch["per_source_limit"] == 2
     assert batch["expected_total"] == 12
     assert batch["max_requests_per_source"] == 10
+    assert batch["max_requests_total"] == 30
+    assert batch["priority_query_count"] == 2
+    assert batch["health_queries"][:2] == [
+        "(salud OR medicina OR enfermedad OR tratamiento OR medicamento)",
+        "(vacuna OR síntomas OR prevención OR cáncer OR diabetes)",
+    ]
     assert list(sources) == [
         "el_comercio",
         "rpp",

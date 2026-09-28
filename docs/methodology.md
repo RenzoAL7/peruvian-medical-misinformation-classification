@@ -4,7 +4,7 @@
 
 El Colab obtiene los `record_id` ya registrados en `Raw` y ejecuta el recolector del repositorio. La configuración solicita hasta dos candidatas de cada uno de seis medios peruanos: El Comercio, RPP Noticias, Latina Noticias, El Peruano, Perú21 y La República.
 
-Latina y Perú21 se procesan primero mediante sus archivos públicos. Los demás medios usan el endpoint `latest` de NewsData con idioma español, país Perú, categoría `health` y diez términos médicos. Las consultas se reparten por rondas entre los medios pendientes y el primer término rota según la cantidad de identificadores ya registrados.
+Latina y Perú21 se procesan primero mediante sus archivos públicos. Los demás medios usan el endpoint `latest` de NewsData con idioma español, país Perú y categoría `health`. Para aprovechar cada crédito, dos consultas prioritarias agrupan con `OR` los diez términos médicos. Si todavía faltan candidatas, se prueban términos individuales, cuyo orden rota según la cantidad de identificadores ya registrados. Las consultas se reparten por rondas entre los medios pendientes y se detienen con un límite interno de 30 solicitudes.
 
 Cada URL se normaliza y se transforma en un `record_id`. Las coincidencias con `Raw` se descartan durante la búsqueda. Antes de anexar, el Colab vuelve a leer la hoja y aplica una segunda deduplicación.
 

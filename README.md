@@ -24,7 +24,9 @@ Cada corrida intenta obtener hasta 12 candidatas: 2 por cada medio.
 | Perú21 | Archivo público de Salud | NewsData |
 | La República | NewsData | — |
 
-Los archivos públicos de Latina y Perú21 se procesan antes de consumir créditos de NewsData. Las consultas API se reparten por rondas entre los medios pendientes y el primer tema rota entre corridas. Los temas configurados son `salud`, `medicina`, `enfermedad`, `tratamiento`, `medicamento`, `vacuna`, `síntomas`, `prevención`, `cáncer` y `diabetes`.
+Los archivos públicos de Latina y Perú21 se procesan antes de consumir créditos de NewsData. Las consultas API se reparten por rondas entre los medios pendientes. Primero se ejecutan dos consultas agrupadas con `OR` que cubren los diez temas médicos en solo dos créditos por medio; si faltan candidatas, los temas individuales rotan entre corridas. NewsData también recibe `removeduplicate=1` y el repositorio vuelve a deduplicar por URL canónica y `record_id`.
+
+El límite interno es de 30 solicitudes por corrida. Que se alcance ese límite significa que el programa se detuvo de forma controlada; no equivale necesariamente a que NewsData haya agotado los créditos de la cuenta.
 
 El endpoint `latest` puede devolver menos de 12 candidatas nuevas si no existen publicaciones recientes suficientes o si la cuenta alcanza su límite temporal. El reporte registra el resultado real; nunca se inventan URLs ni se reutilizan noticias existentes para completar el cupo.
 
