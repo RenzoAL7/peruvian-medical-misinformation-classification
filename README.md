@@ -35,7 +35,7 @@ NewsData.io entrega metadatos de descubrimiento para las fuentes que cubre. Lati
       02_create_manual_review.py
       03_export_training_csv.py
 
-Los CSV generados, reportes y la clave API se guardan localmente y están ignorados por Git.
+Los CSV generados, reportes y la clave API se guardan localmente y están ignorados por Git. El repositorio no versiona ningún CSV del corpus; contiene únicamente código, configuración, documentación y pruebas.
 
 ## Pasos para obtener datos de la API
 
@@ -72,6 +72,12 @@ La salida queda en:
 
 Si una fuente no tiene resultados recientes o NewsData limita temporalmente la cuenta, la corrida queda parcial y el JSON lo documenta. Para Latina, el archivo público se consulta sin paginación, pues `robots.txt` bloquea rutas `/page/`. Nunca se inventan URLs.
 
+Para evitar repetir noticias ya presentes, pasa directamente el Excel del equipo (la hoja `Raw` debe contener `record_id`) o un CSV exportado desde Google Sheets:
+
+    make run EXISTING="/ruta/Excel Revision.xlsx"
+
+El archivo debe contener una cabecera `record_id`; en Excel se busca primero la hoja `Raw` y luego cualquier otra hoja que tenga esa columna. El recolector omite esos identificadores, solicita hasta diez resultados por consulta y, cuando una consulta solo devuelve noticias conocidas, continúa con la siguiente palabra médica configurada (`salud`, `medicina`, `enfermedad`, etc.). La lista se mantiene dentro del alcance médico; no se cambia a temas ajenos para completar el cupo.
+
 ### 6. Crear la hoja de revisión manual
 
 Reemplaza <run_id> por el nombre generado en el paso anterior.
@@ -94,7 +100,7 @@ Completa en Excel y guarda como CSV UTF-8:
 
     make export REVIEW=data/02_review/<run_id>_manual_review.csv
 
-El resultado queda en data/03_processed/training_corpus_real.csv. Solo exporta filas médicas con una afirmación verificable (`is_claim_eligible=SI`), completadas, con evidencia documentada y etiqueta 0 o 1. Las notas administrativas, campañas, acceso a servicios o casos sociales se marcan `is_claim_eligible=NO` y no ingresan al corpus. El batch compartido vigente está descrito en `data/README.md`.
+El resultado queda en data/03_processed/training_corpus_real.csv. Solo exporta filas médicas con una afirmación verificable (`is_claim_eligible=SI`), completadas, con evidencia documentada y etiqueta 0 o 1. Las notas administrativas, campañas, acceso a servicios o casos sociales se marcan `is_claim_eligible=NO` y no ingresan al corpus.
 
 ## Límites del flujo
 

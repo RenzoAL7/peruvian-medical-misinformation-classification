@@ -3,6 +3,7 @@ CONFIG ?= configs/batch_12.yaml
 RUN_ID ?=
 FROM ?=
 REVIEW ?=
+EXISTING ?=
 
 .DEFAULT_GOAL := help
 .PHONY: help setup install test history plan run collect resume review export
@@ -14,7 +15,7 @@ help:
 	@echo "  make test                        Ejecuta las pruebas"
 	@echo "  make history                     Muestra el contador de corridas"
 	@echo "  make plan                        Valida el batch de 12 sin usar la API"
-	@echo "  make run [RUN_ID=nombre]         Ejecuta una corrida real de la API"
+	@echo "  make run [RUN_ID=nombre] [EXISTING=ruta.xlsx]"
 	@echo "  make resume FROM=ruta.csv        Retoma una corrida parcial"
 	@echo "  make review RUN_ID=nombre        Crea la hoja CSV de revisión"
 	@echo "  make export REVIEW=ruta.csv      Exporta el corpus binario real"
@@ -36,7 +37,7 @@ plan:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -B scripts/01_collect_newsdata_urls.py --config $(CONFIG) --dry-run
 
 collect:
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -B scripts/01_collect_newsdata_urls.py --config $(CONFIG) $(if $(RUN_ID),--run-id $(RUN_ID),)
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -B scripts/01_collect_newsdata_urls.py --config $(CONFIG) $(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(EXISTING),--exclude-record-ids "$(EXISTING)",)
 
 run: collect
 

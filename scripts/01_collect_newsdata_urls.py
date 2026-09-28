@@ -23,6 +23,7 @@ from peruvian_medical_misinformation.newsdata import (
     load_yaml,
     next_run_number,
     read_candidates,
+    read_record_ids,
     read_run_registry,
     run_status,
     validate_batch_config,
@@ -57,6 +58,13 @@ def parse_args() -> argparse.Namespace:
         help="CSV de una corrida parcial para completar solo los faltantes por fuente.",
     )
     parser.add_argument(
+        "--exclude-record-ids",
+        help=(
+            "Excel (.xlsx) o CSV con una columna record_id. "
+            "Las noticias existentes se omiten y se prueban las siguientes consultas médicas."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Valida y muestra el alcance sin contactar la API.",
@@ -73,6 +81,9 @@ def main() -> int:
     run_number = next_run_number(read_run_registry(registry_path))
 
     seeded_rows = read_candidates(project_path(args.resume_from)) if args.resume_from else []
+    excluded_record_ids = (
+        read_record_ids(project_path(args.exclude_record_ids)) if args.exclude_record_ids else set()
+    )
 
     if args.dry_run:
         print(f"Siguiente corrida registrada: #{run_number}")
@@ -83,6 +94,8 @@ def main() -> int:
         )
         if seeded_rows:
             print(f"La reanudación conservaría {len(seeded_rows)} candidatas previas.")
+        if excluded_record_ids:
+            print(f"Se excluirían {len(excluded_record_ids)} record_id ya presentes en la hoja.")
         print("No se hicieron solicitudes a NewsData.io.")
         return 0
 
@@ -97,6 +110,7 @@ def main() -> int:
         request_json=httpx_json_request(float(batch["timeout_seconds"])),
         request_html=httpx_html_request(float(batch["timeout_seconds"])),
         seeded_rows=seeded_rows,
+        excluded_record_ids=excluded_record_ids,
     )
     summary["config_path"] = str(config_path.relative_to(REPOSITORY_ROOT))
     summary["executed_at"] = datetime.now(timezone.utc).isoformat()
@@ -136,6 +150,11 @@ def main() -> int:
     print(f"Candidatas guardadas: {len(rows)}/{batch['expected_total']} en {candidates_path}")
     if summary["seeded_total"]:
         print(f"Candidatas conservadas desde una corrida previa: {summary['seeded_total']}")
+    if summary["duplicates_skipped_total"]:
+        print(
+            "Noticias ya presentes omitidas: "
+            f"{summary['duplicates_skipped_total']}; se probaron consultas médicas alternativas."
+        )
     for source_id, counts in summary["per_source"].items():
         print(f"- {source_id}: {counts['collected']}/{counts['requested']}")
     if summary["shortfall_total"]:

@@ -8,9 +8,12 @@ from peruvian_medical_misinformation.newsdata import (
     NewsDataRateLimitError,
     archive_candidates_from_html,
     append_run_registry,
+    canonicalize_url,
     collect_candidates,
     next_run_number,
+    read_record_ids,
     read_run_registry,
+    record_id,
     run_status,
 )
 
@@ -167,6 +170,127 @@ def test_collect_candidates_caps_sources_and_filters_domains() -> None:
     assert all(call["domainurl"] in {"rpp.pe", "elcomercio.pe"} for call in calls)
     assert summary["shortfall_total"] == 0
     assert summary["total_requests"] == 2
+
+
+def test_collect_candidates_skips_sheet_duplicates_and_tries_next_query() -> None:
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 2,
+            "per_source_limit": 2,
+            "results_per_request": 10,
+            "health_queries": ["medicina", "salud"],
+            "max_requests_per_source": 2,
+            "max_requests_total": 2,
+        },
+        "sources": {
+            "rpp": {"name": "RPP Noticias", "source_dataset": "newsdata_rpp", "domain": "rpp.pe"}
+        },
+    }
+    existing_url = canonicalize_url("https://rpp.pe/salud/repetida")
+    calls: list[dict[str, str]] = []
+
+    def fake_request(_: str, params: dict[str, str]) -> dict[str, object]:
+        calls.append(params)
+        if params["q"] == "medicina":
+            return {
+                "status": "success",
+                "results": [{"link": existing_url, "title": "Ya estaba en la hoja"}],
+            }
+        return {
+            "status": "success",
+            "results": [
+                {"link": "https://rpp.pe/salud/nueva-uno", "title": "Nueva uno"},
+                {"link": "https://rpp.pe/salud/nueva-dos", "title": "Nueva dos"},
+            ],
+        }
+
+    rows, summary = collect_candidates(
+        config,
+        api_key="secret",
+        run_id="test_run",
+        request_json=fake_request,
+        excluded_record_ids={record_id(existing_url)},
+        sleep=lambda _: None,
+    )
+
+    assert [call["q"] for call in calls] == ["medicina", "salud"]
+    assert all(call["size"] == "10" for call in calls)
+    assert {row["title"] for row in rows} == {"Nueva uno", "Nueva dos"}
+    assert summary["duplicates_skipped_total"] == 1
+    assert summary["per_source"]["rpp"]["duplicates_skipped"] == 1
+
+
+def test_archive_fallback_does_not_duplicate_partial_archive_result() -> None:
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 2,
+            "per_source_limit": 2,
+            "health_queries": ["salud"],
+            "max_requests_per_source": 2,
+            "max_requests_total": 2,
+        },
+        "sources": {
+            "latina": {
+                "name": "Latina Noticias",
+                "source_dataset": "archive_latina",
+                "newsdata_source_dataset": "newsdata_latina",
+                "domain": "latinanoticias.pe",
+                "discovery": "archive",
+                "newsdata_fallback": True,
+                "archive_urls": ["https://latinanoticias.pe/noticias-sobre/salud/"],
+            }
+        },
+    }
+    html = """
+    <section id="principal">
+      <figure class="main-card"><a href="/lima/salud-uno_20260901/">Salud uno</a></figure>
+    </section>
+    """
+
+    rows, summary = collect_candidates(
+        config,
+        api_key="secret",
+        run_id="test_run",
+        request_json=lambda *_: {
+            "status": "success",
+            "results": [{"link": "https://latinanoticias.pe/lima/salud-dos_20260902/", "title": "Salud dos"}],
+        },
+        request_html=lambda _: html,
+        sleep=lambda _: None,
+    )
+
+    assert len(rows) == 2
+    assert len({row["record_id"] for row in rows}) == 2
+    assert summary["collected_total"] == 2
+
+
+def test_read_record_ids_from_sheet_export(tmp_path) -> None:
+    exported = tmp_path / "raw.csv"
+    exported.write_text("record_id,title\nabc,Uno\nabc,Duplicada\ndef,Dos\n", encoding="utf-8-sig")
+
+    assert read_record_ids(exported) == {"abc", "def"}
+
+
+def test_read_record_ids_from_excel_raw_sheet(tmp_path) -> None:
+    from openpyxl import Workbook
+
+    exported = tmp_path / "revision.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Raw"
+    worksheet.append(["run_id", "record_id", "title"])
+    worksheet.append(["run_1", "abc", "Uno"])
+    worksheet.append(["run_2", "abc", "Duplicada"])
+    worksheet.append(["run_3", "def", "Dos"])
+    workbook.save(exported)
+
+    assert read_record_ids(exported) == {"abc", "def"}
 
 
 def test_collect_candidates_stops_after_rate_limit() -> None:

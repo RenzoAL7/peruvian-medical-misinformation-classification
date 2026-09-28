@@ -418,19 +418,22 @@ def collect_candidates(
     request_json: RequestJSON,
     request_html: RequestHTML | None = None,
     seeded_rows: Iterable[Mapping[str, Any]] = (),
+    excluded_record_ids: Iterable[str] = (),
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    """Recolecta como máximo 10 candidatas por fuente sin inventar faltantes."""
+    """Recolecta candidatas nuevas y prueba otras consultas ante duplicados."""
 
     batch, sources = validate_batch_config(config)
     limit = int(batch["per_source_limit"])
+    results_per_request = max(limit, int(batch.get("results_per_request", limit)))
     delay = float(batch.get("request_delay_seconds", 0))
     max_requests = int(batch.get("max_requests_per_source", 1))
     max_total_requests = int(batch.get("max_requests_total", 30))
     if max_total_requests < 1:
         raise NewsDataConfigurationError("max_requests_total debe ser al menos 1")
     queries = [str(value).strip() for value in batch["health_queries"] if str(value).strip()]
+    excluded_ids = {str(value).strip() for value in excluded_record_ids if str(value).strip()}
     seeded_by_source: dict[str, dict[str, dict[str, str]]] = {source_id: {} for source_id in sources}
     for item in seeded_rows:
         source_id = str(item.get("source_id") or "").strip()
@@ -438,7 +441,7 @@ def collect_candidates(
         if source is None:
             continue
         row = normalize_seeded_article(item, source_id=source_id, source=source, run_id=run_id)
-        if row is not None:
+        if row is not None and row["record_id"] not in excluded_ids:
             seeded_by_source[source_id].setdefault(row["canonical_url"], row)
 
     candidates: list[dict[str, str]] = []
@@ -448,10 +451,12 @@ def collect_candidates(
     archive_requests_total = 0
     rate_limited = False
     request_budget_exhausted = False
+    duplicates_skipped_ids: set[str] = set()
 
     for source_id, source in sources.items():
         selected = dict(seeded_by_source[source_id])
         requests_made = 0
+        source_duplicate_ids: set[str] = set()
         source_status = "completed"
         discovery = str(source.get("discovery", "newsdata"))
         if discovery == "archive":
@@ -476,22 +481,27 @@ def collect_candidates(
                     run_id=run_id,
                     retrieved_at=retrieved_at,
                 ):
+                    if row["record_id"] in excluded_ids:
+                        source_duplicate_ids.add(row["record_id"])
+                        duplicates_skipped_ids.add(row["record_id"])
+                        continue
                     selected.setdefault(row["canonical_url"], row)
                     if len(selected) >= limit:
                         break
                 if delay and len(selected) < limit:
                     sleep(delay)
             rows = list(selected.values())[:limit]
-            candidates.extend(rows)
-            per_source[source_id] = {
-                "requested": limit,
-                "collected": len(rows),
-                "shortfall": max(0, limit - len(rows)),
-                "requests_made": requests_made,
-                "seeded": len(seeded_by_source[source_id]),
-                "status": source_status,
-            }
             if len(selected) >= limit or not source.get("newsdata_fallback", False):
+                candidates.extend(rows)
+                per_source[source_id] = {
+                    "requested": limit,
+                    "collected": len(rows),
+                    "shortfall": max(0, limit - len(rows)),
+                    "requests_made": requests_made,
+                    "seeded": len(seeded_by_source[source_id]),
+                    "duplicates_skipped": len(source_duplicate_ids),
+                    "status": source_status,
+                }
                 continue
         for query in queries:
             if len(selected) >= limit or requests_made >= max_requests:
@@ -507,7 +517,7 @@ def collect_candidates(
                 "country": str(batch.get("country", "pe")),
                 "category": str(batch.get("category", "health")),
                 "q": query,
-                "size": str(limit),
+                "size": str(results_per_request),
             }
             requests_made += 1
             total_requests += 1
@@ -534,6 +544,10 @@ def collect_candidates(
                     retrieved_at=retrieved_at,
                 )
                 if row is not None:
+                    if row["record_id"] in excluded_ids:
+                        source_duplicate_ids.add(row["record_id"])
+                        duplicates_skipped_ids.add(row["record_id"])
+                        continue
                     selected.setdefault(row["canonical_url"], row)
                     if len(selected) >= limit:
                         break
@@ -547,6 +561,7 @@ def collect_candidates(
             "shortfall": max(0, limit - len(rows)),
             "requests_made": requests_made,
             "seeded": len(seeded_by_source[source_id]),
+            "duplicates_skipped": len(source_duplicate_ids),
             "status": source_status,
         }
         if rate_limited or request_budget_exhausted:
@@ -560,6 +575,7 @@ def collect_candidates(
                 "shortfall": limit,
                 "requests_made": 0,
                 "seeded": 0,
+                "duplicates_skipped": 0,
                 "status": "not_requested_after_rate_limit" if rate_limited else "not_requested_after_budget",
             }
 
@@ -572,6 +588,8 @@ def collect_candidates(
         "per_source": per_source,
         "errors": errors,
         "seeded_total": sum(len(rows) for rows in seeded_by_source.values()),
+        "excluded_record_ids_total": len(excluded_ids),
+        "duplicates_skipped_total": len(duplicates_skipped_ids),
         "total_requests": total_requests,
         "archive_requests_total": archive_requests_total,
         "rate_limited": rate_limited,
@@ -602,6 +620,55 @@ def read_candidates(path: str | Path) -> list[dict[str, str]]:
                 "El CSV para reanudar no contiene: " + ", ".join(sorted(missing))
             )
         return [dict(row) for row in reader]
+
+
+def read_record_ids(path: str | Path) -> set[str]:
+    """Lee record_id desde CSV o desde una hoja de cálculo de Excel."""
+
+    source = Path(path)
+    if source.suffix.lower() in {".xlsx", ".xlsm"}:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(source, read_only=True, data_only=True)
+        worksheets = list(workbook.worksheets)
+        if "Raw" in workbook.sheetnames:
+            raw_sheet = workbook["Raw"]
+            worksheets = [raw_sheet, *(sheet for sheet in worksheets if sheet.title != "Raw")]
+        try:
+            for worksheet in worksheets:
+                rows = worksheet.iter_rows(values_only=True)
+                header = next(rows, None)
+                fieldnames = [str(value or "").strip() for value in header or ()]
+                if "record_id" not in fieldnames:
+                    continue
+                record_id_index = fieldnames.index("record_id")
+                return {
+                    str(row[record_id_index] or "").strip()
+                    for row in rows
+                    if len(row) > record_id_index and str(row[record_id_index] or "").strip()
+                }
+        finally:
+            workbook.close()
+        raise NewsDataConfigurationError(
+            "El Excel de registros existentes debe contener una columna record_id"
+        )
+
+    if source.suffix.lower() != ".csv":
+        raise NewsDataConfigurationError(
+            "El archivo de registros existentes debe ser .xlsx, .xlsm o .csv"
+        )
+    with source.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = set(reader.fieldnames or [])
+        if "record_id" not in fieldnames:
+            raise NewsDataConfigurationError(
+                "El archivo de registros existentes debe contener la columna record_id"
+            )
+        return {
+            str(row.get("record_id") or "").strip()
+            for row in reader
+            if str(row.get("record_id") or "").strip()
+        }
 
 
 def write_summary(path: str | Path, summary: Mapping[str, Any]) -> None:
