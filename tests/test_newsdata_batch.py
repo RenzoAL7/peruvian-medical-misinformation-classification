@@ -215,6 +215,7 @@ def test_collect_candidates_skips_sheet_duplicates_and_tries_next_query() -> Non
 
     assert [call["q"] for call in calls] == ["medicina", "salud"]
     assert all(call["size"] == "10" for call in calls)
+    assert all(call["removeduplicate"] == "1" for call in calls)
     assert {row["title"] for row in rows} == {"Nueva uno", "Nueva dos"}
     assert summary["duplicates_skipped_total"] == 1
     assert summary["per_source"]["rpp"]["duplicates_skipped"] == 1
@@ -448,6 +449,44 @@ def test_collect_candidates_rotates_the_first_medical_topic() -> None:
 
     assert calls == ["medicina"]
     assert summary["query_order"] == ["medicina", "cáncer", "salud"]
+    assert summary["query_offset"] == 1
+
+
+def test_collect_candidates_keeps_grouped_queries_first_when_topics_rotate() -> None:
+    grouped = "(salud OR medicina OR enfermedad)"
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 1,
+            "per_source_limit": 1,
+            "health_queries": [grouped, "salud", "medicina", "cáncer"],
+            "priority_query_count": 1,
+            "max_requests_per_source": 4,
+            "max_requests_total": 4,
+        },
+        "sources": {
+            "rpp": {"name": "RPP Noticias", "source_dataset": "newsdata_rpp", "domain": "rpp.pe"}
+        },
+    }
+    calls: list[str] = []
+
+    def empty_request(_: str, params: dict[str, str]) -> dict[str, object]:
+        calls.append(params["q"])
+        return {"status": "success", "results": []}
+
+    _, summary = collect_candidates(
+        config,
+        api_key="secret",
+        run_id="test_run",
+        request_json=empty_request,
+        query_offset=1,
+        sleep=lambda _: None,
+    )
+
+    assert calls == [grouped, "medicina", "cáncer", "salud"]
+    assert summary["query_order"] == calls
     assert summary["query_offset"] == 1
 
 

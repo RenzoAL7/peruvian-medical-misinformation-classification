@@ -110,8 +110,14 @@ def main() -> int:
     load_local_env(project_path(args.env_file))
     api_key = api_key_from_environment()
     run_id = args.run_id or f"run_{run_number:03d}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    query_count = len([query for query in batch["health_queries"] if str(query).strip()])
-    query_offset = len(excluded_record_ids) % query_count if args.rotate_queries and query_count else 0
+    configured_queries = [query for query in batch["health_queries"] if str(query).strip()]
+    priority_query_count = int(batch.get("priority_query_count", 0))
+    rotating_query_count = max(0, len(configured_queries) - priority_query_count)
+    query_offset = (
+        len(excluded_record_ids) % rotating_query_count
+        if args.rotate_queries and rotating_query_count
+        else 0
+    )
 
     rows, summary = collect_candidates(
         config,
@@ -175,6 +181,11 @@ def main() -> int:
         )
     if summary["shortfall_total"]:
         print("La API no devolvió suficientes candidatas para completar el batch; no se inventaron URLs.")
+    if summary["request_budget_exhausted"]:
+        print(
+            "Se alcanzó el límite interno de solicitudes configurado para esta corrida; "
+            "no es el warning de Google Sheets ni necesariamente un límite de NewsData."
+        )
     if summary["rate_limited"]:
         print("La API alcanzó su límite temporal. Espera el reinicio de NewsData y ejecuta una nueva corrida.")
     if summary["errors"]:
