@@ -419,10 +419,11 @@ def collect_candidates(
     request_html: RequestHTML | None = None,
     seeded_rows: Iterable[Mapping[str, Any]] = (),
     excluded_record_ids: Iterable[str] = (),
+    query_offset: int = 0,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    """Recolecta candidatas nuevas y prueba otras consultas ante duplicados."""
+    """Recolecta candidatas nuevas con archivos primero y consultas API equitativas."""
 
     batch, sources = validate_batch_config(config)
     limit = int(batch["per_source_limit"])
@@ -432,7 +433,11 @@ def collect_candidates(
     max_total_requests = int(batch.get("max_requests_total", 30))
     if max_total_requests < 1:
         raise NewsDataConfigurationError("max_requests_total debe ser al menos 1")
-    queries = [str(value).strip() for value in batch["health_queries"] if str(value).strip()]
+    configured_queries = [str(value).strip() for value in batch["health_queries"] if str(value).strip()]
+    if not configured_queries:
+        raise NewsDataConfigurationError("health_queries debe contener al menos una consulta")
+    normalized_offset = int(query_offset) % len(configured_queries)
+    queries = configured_queries[normalized_offset:] + configured_queries[:normalized_offset]
     excluded_ids = {str(value).strip() for value in excluded_record_ids if str(value).strip()}
     seeded_by_source: dict[str, dict[str, dict[str, str]]] = {source_id: {} for source_id in sources}
     for item in seeded_rows:
@@ -444,71 +449,84 @@ def collect_candidates(
         if row is not None and row["record_id"] not in excluded_ids:
             seeded_by_source[source_id].setdefault(row["canonical_url"], row)
 
-    candidates: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
-    per_source: dict[str, dict[str, Any]] = {}
     total_requests = 0
     archive_requests_total = 0
     rate_limited = False
     request_budget_exhausted = False
     duplicates_skipped_ids: set[str] = set()
+    selected_by_source = {source_id: dict(rows) for source_id, rows in seeded_by_source.items()}
+    source_state: dict[str, dict[str, Any]] = {
+        source_id: {
+            "archive_requests": 0,
+            "api_requests": 0,
+            "queries_attempted": [],
+            "duplicate_ids": set(),
+            "status": "completed",
+        }
+        for source_id in sources
+    }
 
+    # Los archivos públicos no consumen créditos de NewsData. Se procesan todos
+    # antes de cualquier llamada API, aunque en el YAML estén intercalados.
     for source_id, source in sources.items():
-        selected = dict(seeded_by_source[source_id])
-        requests_made = 0
-        source_duplicate_ids: set[str] = set()
-        source_status = "completed"
-        discovery = str(source.get("discovery", "newsdata"))
-        if discovery == "archive":
-            if request_html is None:
-                raise NewsDataConfigurationError("Se requiere request_html para una fuente de archivo público")
-            for archive_url in source.get("archive_urls", []):
+        if str(source.get("discovery", "newsdata")) != "archive":
+            continue
+        if request_html is None:
+            raise NewsDataConfigurationError("Se requiere request_html para una fuente de archivo público")
+        selected = selected_by_source[source_id]
+        state = source_state[source_id]
+        for archive_url in source.get("archive_urls", []):
+            if len(selected) >= limit:
+                break
+            state["archive_requests"] += 1
+            archive_requests_total += 1
+            try:
+                html = request_html(str(archive_url))
+            except (httpx.HTTPError, NewsDataRequestError) as error:
+                errors.append({"source_id": source_id, "query": str(archive_url), "error": str(error)})
+                continue
+            retrieved_at = now().isoformat()
+            for row in archive_candidates_from_html(
+                html,
+                archive_url=str(archive_url),
+                source_id=source_id,
+                source=source,
+                run_id=run_id,
+                retrieved_at=retrieved_at,
+            ):
+                if row["record_id"] in excluded_ids:
+                    state["duplicate_ids"].add(row["record_id"])
+                    duplicates_skipped_ids.add(row["record_id"])
+                    continue
+                selected.setdefault(row["canonical_url"], row)
                 if len(selected) >= limit:
                     break
-                requests_made += 1
-                archive_requests_total += 1
-                try:
-                    html = request_html(str(archive_url))
-                except (httpx.HTTPError, NewsDataRequestError) as error:
-                    errors.append({"source_id": source_id, "query": str(archive_url), "error": str(error)})
-                    continue
-                retrieved_at = now().isoformat()
-                for row in archive_candidates_from_html(
-                    html,
-                    archive_url=str(archive_url),
-                    source_id=source_id,
-                    source=source,
-                    run_id=run_id,
-                    retrieved_at=retrieved_at,
-                ):
-                    if row["record_id"] in excluded_ids:
-                        source_duplicate_ids.add(row["record_id"])
-                        duplicates_skipped_ids.add(row["record_id"])
-                        continue
-                    selected.setdefault(row["canonical_url"], row)
-                    if len(selected) >= limit:
-                        break
-                if delay and len(selected) < limit:
-                    sleep(delay)
-            rows = list(selected.values())[:limit]
-            if len(selected) >= limit or not source.get("newsdata_fallback", False):
-                candidates.extend(rows)
-                per_source[source_id] = {
-                    "requested": limit,
-                    "collected": len(rows),
-                    "shortfall": max(0, limit - len(rows)),
-                    "requests_made": requests_made,
-                    "seeded": len(seeded_by_source[source_id]),
-                    "duplicates_skipped": len(source_duplicate_ids),
-                    "status": source_status,
-                }
+            if delay and len(selected) < limit:
+                sleep(delay)
+
+    # Las consultas se reparten por rondas: cada medio pendiente prueba el tema
+    # actual antes de que un solo medio consuma todo el presupuesto.
+    api_source_ids = [
+        source_id
+        for source_id, source in sources.items()
+        if len(selected_by_source[source_id]) < limit
+        and (
+            str(source.get("discovery", "newsdata")) == "newsdata"
+            or bool(source.get("newsdata_fallback", False))
+        )
+    ]
+    stop_api_requests = False
+    for query in queries:
+        for source_id in api_source_ids:
+            source = sources[source_id]
+            selected = selected_by_source[source_id]
+            state = source_state[source_id]
+            if len(selected) >= limit or state["api_requests"] >= max_requests:
                 continue
-        for query in queries:
-            if len(selected) >= limit or requests_made >= max_requests:
-                break
             if total_requests >= max_total_requests:
                 request_budget_exhausted = True
-                source_status = "request_budget_exhausted"
+                stop_api_requests = True
                 break
             params = {
                 "apikey": api_key,
@@ -519,14 +537,16 @@ def collect_candidates(
                 "q": query,
                 "size": str(results_per_request),
             }
-            requests_made += 1
+            state["api_requests"] += 1
+            state["queries_attempted"].append(query)
             total_requests += 1
             try:
                 payload = request_json(str(batch["endpoint"]), params)
             except NewsDataRateLimitError as error:
                 errors.append({"source_id": source_id, "query": query, "error": str(error)})
                 rate_limited = True
-                source_status = "rate_limited"
+                state["status"] = "rate_limited"
+                stop_api_requests = True
                 break
             except (httpx.HTTPError, NewsDataRequestError) as error:
                 errors.append({"source_id": source_id, "query": query, "error": str(error)})
@@ -543,41 +563,55 @@ def collect_candidates(
                     query=query,
                     retrieved_at=retrieved_at,
                 )
-                if row is not None:
-                    if row["record_id"] in excluded_ids:
-                        source_duplicate_ids.add(row["record_id"])
-                        duplicates_skipped_ids.add(row["record_id"])
-                        continue
-                    selected.setdefault(row["canonical_url"], row)
-                    if len(selected) >= limit:
-                        break
+                if row is None:
+                    continue
+                if row["record_id"] in excluded_ids:
+                    state["duplicate_ids"].add(row["record_id"])
+                    duplicates_skipped_ids.add(row["record_id"])
+                    continue
+                selected.setdefault(row["canonical_url"], row)
+                if len(selected) >= limit:
+                    break
             if delay and len(selected) < limit:
                 sleep(delay)
-        rows = list(selected.values())[:limit]
-        candidates.extend(rows)
-        per_source[source_id] = {
-            "requested": limit,
-            "collected": len(rows),
-            "shortfall": max(0, limit - len(rows)),
-            "requests_made": requests_made,
-            "seeded": len(seeded_by_source[source_id]),
-            "duplicates_skipped": len(source_duplicate_ids),
-            "status": source_status,
-        }
-        if rate_limited or request_budget_exhausted:
+        if stop_api_requests:
             break
 
-    for source_id in sources:
-        if source_id not in per_source:
-            per_source[source_id] = {
-                "requested": limit,
-                "collected": 0,
-                "shortfall": limit,
-                "requests_made": 0,
-                "seeded": 0,
-                "duplicates_skipped": 0,
-                "status": "not_requested_after_rate_limit" if rate_limited else "not_requested_after_budget",
-            }
+    candidates: list[dict[str, str]] = []
+    per_source: dict[str, dict[str, Any]] = {}
+    for source_id, source in sources.items():
+        selected_rows = list(selected_by_source[source_id].values())[:limit]
+        state = source_state[source_id]
+        if len(selected_rows) < limit and state["status"] == "completed":
+            if rate_limited:
+                state["status"] = (
+                    "incomplete_after_rate_limit"
+                    if state["api_requests"]
+                    else "not_requested_after_rate_limit"
+                )
+            elif request_budget_exhausted:
+                state["status"] = (
+                    "request_budget_exhausted"
+                    if state["api_requests"]
+                    else "not_requested_after_budget"
+                )
+            elif state["api_requests"] >= max_requests:
+                state["status"] = "max_requests_exhausted"
+            else:
+                state["status"] = "partial_no_results"
+        candidates.extend(selected_rows)
+        per_source[source_id] = {
+            "requested": limit,
+            "collected": len(selected_rows),
+            "shortfall": max(0, limit - len(selected_rows)),
+            "requests_made": state["archive_requests"] + state["api_requests"],
+            "archive_requests": state["archive_requests"],
+            "api_requests": state["api_requests"],
+            "queries_attempted": state["queries_attempted"],
+            "seeded": len(seeded_by_source[source_id]),
+            "duplicates_skipped": len(state["duplicate_ids"]),
+            "status": state["status"],
+        }
 
     candidates.sort(key=lambda row: (row["source_id"], row["published_at"], row["canonical_url"]))
     summary: dict[str, Any] = {
@@ -586,6 +620,8 @@ def collect_candidates(
         "collected_total": len(candidates),
         "shortfall_total": max(0, int(batch["expected_total"]) - len(candidates)),
         "per_source": per_source,
+        "query_order": queries,
+        "query_offset": normalized_offset,
         "errors": errors,
         "seeded_total": sum(len(rows) for rows in seeded_by_source.values()),
         "excluded_record_ids_total": len(excluded_ids),

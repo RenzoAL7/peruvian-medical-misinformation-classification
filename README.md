@@ -83,9 +83,12 @@ En Colab, exporta primero los valores de `Raw!B2:B` a un CSV temporal con cabece
     python scripts/01_collect_newsdata_urls.py \
       --config configs/batch_12.yaml \
       --run-id <run_id> \
-      --exclude-record-ids /content/raw_record_ids.csv
+      --exclude-record-ids /content/raw_record_ids.csv \
+      --rotate-queries
 
 Antes de anexar la salida a `Raw`, vuelve a leer `Raw!B2:B` y elimina cualquier `record_id` que ya exista. Esta segunda comprobación hace que reejecutar la celda de anexado sea idempotente y evita duplicados si otra persona agregó filas mientras corría la búsqueda.
+
+El recolector procesa primero todos los archivos públicos de Latina y Perú21, que no consumen créditos de NewsData. Luego reparte el presupuesto API por rondas entre los demás medios: todos prueban el tema actual antes de avanzar al siguiente. `--rotate-queries` cambia el primer tema según la cantidad de noticias ya registradas, por lo que las corridas sucesivas no comienzan siempre con `salud`. Si NewsData responde con límite temporal, los archivos públicos ya quedaron procesados y el reporte identifica cuáles medios no pudieron completar su cupo.
 
 ### 6. Crear la hoja de revisión manual
 

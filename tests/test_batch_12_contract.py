@@ -12,6 +12,7 @@ def test_batch_12_keeps_the_six_approved_outlets_and_discovery_modes() -> None:
 
     assert batch["per_source_limit"] == 2
     assert batch["expected_total"] == 12
+    assert batch["max_requests_per_source"] == 10
     assert list(sources) == [
         "el_comercio",
         "rpp",
@@ -33,4 +34,3 @@ def test_batch_12_keeps_the_six_approved_outlets_and_discovery_modes() -> None:
     }
     assert sources["latina"]["newsdata_fallback"] is True
     assert sources["peru21"]["newsdata_fallback"] is True
-
