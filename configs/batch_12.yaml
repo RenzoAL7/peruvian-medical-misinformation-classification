@@ -17,6 +17,10 @@ batch:
   timeout_seconds: 30
   max_requests_per_source: 6
   max_requests_total: 20
+  # Recupera hasta 10 resultados por crédito y conserva solo candidatas nuevas.
+  # Si una respuesta contiene record_id ya presentes en la hoja, continúa con
+  # la siguiente consulta médica de esta lista.
+  results_per_request: 10
   health_queries:
     - salud
     - medicina

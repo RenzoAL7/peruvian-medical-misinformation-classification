@@ -15,14 +15,13 @@ checkpoints/
 # Datos locales y artefactos generados
 # Los resultados de cada corrida y las revisiones humanas se conservan localmente.
 # No se suben al repositorio ni se mezclan con credenciales.
+*.csv
 data/00_control/*
 !data/00_control/.gitkeep
 data/01_candidates/*
 !data/01_candidates/.gitkeep
-!data/01_candidates/run_004_20260927T143557Z.csv
 data/02_review/*
 !data/02_review/.gitkeep
-!data/02_review/run_004_20260927T143557Z_manual_review.csv
 data/03_processed/*
 !data/03_processed/.gitkeep
 reports/runs/*
