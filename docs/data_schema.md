@@ -1,57 +1,52 @@
-# Esquema de datos
+# Esquema de datos vigente
 
-## 0. Contador de corridas
+Google Sheets es el espacio de trabajo del corpus. El repositorio genera únicamente artefactos temporales para alimentar las pestañas `Raw` y `Extraccion`.
 
-data/00_control/run_registry.csv agrega una fila por cada ejecución real. Sus
-campos principales son `run_number`, `run_id`, `executed_at`, `status`,
-`expected_total`, `collected_total`, `shortfall_total`, `total_requests`, rutas
-del CSV y del reporte. El contador aumenta aunque la API deje una corrida
-parcial, para no perder trazabilidad.
+## Raw
 
-## 1. Candidatas de una corrida
+Una fila representa una noticia candidata todavía no validada.
 
-Cada ejecución de 01_collect_newsdata_urls.py crea data/01_candidates/<run_id>.csv. Una fila representa una candidata descubierta por NewsData.io o por un archivo público permitido, no una noticia ya validada.
-
-| Campo | Descripción |
+| Campo | Uso |
 | --- | --- |
-| run_id, seeded_from_run_id | Identificador de la corrida actual y, si aplica, de la corrida parcial de la que se conservó la candidata. |
-| record_id | Hash corto y estable de la URL canónica. |
-| source_dataset, source_id, source_name, source_domain | Procedencia configurada. |
-| url, canonical_url | Enlace recibido y versión sin parámetros de seguimiento. |
-| title, description, author | Metadatos de texto suministrados por la API o el archivo público. |
-| published_at, language, country, category | Fecha y clasificación declaradas por la API; los campos no presentes en el archivo quedan vacíos hasta la revisión. |
-| newsdata_article_id, api_query, retrieved_at | Trazabilidad de la respuesta o del archivo de descubrimiento y de la consulta. |
+| `run_id` | Corrida que descubrió la candidata. |
+| `record_id` | Hash estable de la URL canónica; se usa para deduplicar. |
+| `source_dataset`, `source_name`, `source_domain` | Procedencia y medio. |
+| `url`, `canonical_url` | URL recibida y versión normalizada sin rastreadores. |
+| `published_at` | Fecha publicada cuando la fuente la entrega. |
+| `title`, `subtitle_or_bajada`, `author` | Metadatos editoriales. |
+| `newsdata_article_id` | Identificador de NewsData, vacío para archivos públicos. |
+| `api_query` | Tema consultado o URL del archivo público. |
+| `retrieved_at` | Fecha UTC de recuperación. |
+| `is_medical` | `SI`, `NO` o `PENDIENTE`, decidido por revisión humana. |
+| `medical_relevance_reason` | Justificación breve de inclusión o descarte. |
+| `is_claim_eligible` | Indica si existe una afirmación médica concreta y verificable. |
+| `review_status` | Estado de la revisión de la candidata. |
 
-Los valores permitidos de source_dataset son newsdata_el_comercio, newsdata_rpp, archive_latina, newsdata_latina, newsdata_el_peruano, archive_peru21, newsdata_peru21 y newsdata_la_republica. `archive_latina` y `archive_peru21` identifican candidatas descubiertas en archivos públicos; los valores `newsdata_*` identifican las candidatas recibidas desde la API de respaldo.
+El Colab elimina duplicados dentro de la corrida y vuelve a consultar los `record_id` existentes inmediatamente antes de anexar.
 
-## 2. Revisión humana
+## Extraccion
 
-02_create_manual_review.py crea data/02_review/<run_id>_manual_review.csv. Conserva los campos de procedencia y añade los siguientes campos editables.
+Solo recibe filas de `Raw` con `is_medical=SI`, `is_claim_eligible=SI` y `review_status=COMPLETADA`. Conserva la trazabilidad anterior y añade:
 
-| Campo | Regla de uso |
+| Campo | Uso |
 | --- | --- |
-| is_medical | SI cuando el investigador confirma que el caso trata una afirmación de salud/medicina; NO en caso contrario. |
-| medical_relevance_reason | Breve razón de inclusión o descarte temático. |
-| is_claim_eligible | SI únicamente si el texto contiene una afirmación médica principal, concreta y contrastable; NO para campañas, inspecciones, anuncios institucionales, infraestructura, acceso a servicios, casos policiales o relatos sin una afirmación verificable. |
-| body | Cuerpo de la noticia obtenido y pegado por el investigador. |
-| main_medical_claim | Una afirmación médica verificable delimitada manualmente. |
-| evidence_source, evidence_url, evidence_excerpt | Fuente, enlace y fragmento que respaldan el contraste. |
-| label | 0, 1 o EXCLUIDA; nunca se llena a partir del medio. |
-| label_reason | Razón concisa que conecta afirmación y evidencia. |
-| reviewer, review_status, reviewed_at | Responsable, estado y fecha de la revisión. |
+| `body` | Texto principal descargado desde la URL pública. |
+| `http_status` | Código HTTP obtenido. |
+| `extraction_method` | `trafilatura`, respaldo con BeautifulSoup o ausencia de extracción. |
+| `extraction_status` | `OK`, `CUERPO_CORTO` o error de descarga. |
+| `extracted_at` | Fecha UTC de extracción. |
+| `main_medical_claim` | Afirmación médica principal delimitada manualmente. |
+| `evidence_source`, `evidence_url`, `evidence_excerpt` | Evidencia usada para contrastar la afirmación. |
+| `label`, `label_reason` | Etiqueta manual y su justificación. |
+| `final_training_eligible` | Decisión final de inclusión en el corpus binario. |
+| `reviewer`, `validation_status`, `validated_at` | Responsable y trazabilidad de validación. |
 
-La hoja se debe conservar como CSV UTF-8. La revisión final debe usar review_status=COMPLETADA.
+La extracción del cuerpo no asigna una etiqueta. Las decisiones médicas y de veracidad siguen siendo humanas y basadas en evidencia.
 
-## 3. Corpus binario real
+## Artefactos temporales
 
-03_export_training_csv.py filtra el CSV manual y crea data/03_processed/training_corpus_real.csv con las columnas siguientes:
+- `data/00_control/run_registry.csv`: estado y cantidades de cada ejecución local.
+- `data/01_candidates/<run_id>.csv`: salida temporal consumida por el Colab.
+- `reports/runs/<run_id>.json`: temas intentados, resultados por medio, duplicados y límites encontrados.
 
-| Campo | Descripción |
-| --- | --- |
-| record_id | Identificador de la candidata original. |
-| text | Concatenación normalizada de título, bajada y cuerpo. |
-| label | Solo 0 o 1. |
-| source_dataset, source_name, url, published_at | Metadatos para auditoría, no variables del modelo. |
-| is_synthetic | false en esta fase. |
-
-Una fila solo entra al corpus final si `is_medical=SI` e `is_claim_eligible=SI`, además de tener cuerpo, afirmación principal, fuente y URL de evidencia, razón de etiqueta, estado COMPLETADA y etiqueta binaria. Se eliminan duplicados exactos por URL canónica o texto normalizado al exportar. Las filas con cualquiera de esos campos en NO y las EXCLUIDA permanecen en la hoja de revisión, pero no ingresan al CSV de entrenamiento.
+Estos archivos están ignorados por Git y no constituyen el corpus final.

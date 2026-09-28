@@ -1,129 +1,79 @@
 # Corpus de noticias médicas peruanas
 
-Este repositorio implementa la adquisición y preparación manual del corpus para Seminario 1. No entrena modelos ni etiqueta automáticamente una noticia como verdadera o falsa.
+Este repositorio contiene únicamente el recolector utilizado por el [notebook de Google Colab](https://colab.research.google.com/drive/1he9_gDLiOBVrkqHuK1PynkTCps4_6OeN). Su función es descubrir noticias candidatas y conservar su trazabilidad. No decide si una noticia es médica ni asigna etiquetas de veracidad.
 
-## Qué hace cada corrida
+## Flujo vigente
 
-Cada corrida busca hasta 12 candidatas: 2 de cada medio.
+1. El Colab lee los `record_id` existentes en la pestaña `Raw` de Google Sheets.
+2. Ejecuta `scripts/01_collect_newsdata_urls.py` y le pasa esos identificadores para evitar repeticiones.
+3. El recolector carga `configs/batch_12.yaml`, consulta archivos públicos y NewsData, y guarda un CSV temporal de candidatas.
+4. El Colab vuelve a comprobar los identificadores y anexa a `Raw` únicamente las noticias nuevas.
+5. El investigador revisa manualmente relevancia médica y elegibilidad de la afirmación.
+6. El Colab descarga el cuerpo de las filas aprobadas y las agrega a `Extraccion` para la posterior validación con evidencia.
 
-1. El Comercio
-2. RPP Noticias
-3. Latina Noticias
-4. El Peruano
-5. Perú21
-6. La República
+## Medios y método de descubrimiento
 
-NewsData.io entrega metadatos de descubrimiento para las fuentes que cubre. Latina Noticias se descubre directamente desde sus archivos públicos de [Salud](https://latinanoticias.pe/noticias-sobre/salud/) y [Medicina](https://latinanoticias.pe/noticias-sobre/medicina/); Perú21 usa su archivo público de [Salud](https://peru21.pe/noticias/salud/). En ambas fuentes, NewsData queda configurado como respaldo si los archivos públicos no alcanzan las dos URLs. Las palabras clave solo filtran candidatas para evitar menú, publicidad y notas ajenas; la revisión manual sigue decidiendo si una noticia es médica y su etiqueta. El medio no determina si la noticia es médica ni cuál será su etiqueta.
+Cada corrida intenta obtener hasta 12 candidatas: 2 por cada medio.
 
-## Carpetas
+| Medio | Método principal | Respaldo |
+| --- | --- | --- |
+| El Comercio | NewsData | — |
+| RPP Noticias | NewsData | — |
+| Latina Noticias | Archivo público de Salud/Medicina | NewsData |
+| El Peruano | NewsData | — |
+| Perú21 | Archivo público de Salud | NewsData |
+| La República | NewsData | — |
 
-    configs/
-      batch_12.yaml             configuración del batch
+Los archivos públicos de Latina y Perú21 se procesan antes de consumir créditos de NewsData. Las consultas API se reparten por rondas entre los medios pendientes y el primer tema rota entre corridas. Los temas configurados son `salud`, `medicina`, `enfermedad`, `tratamiento`, `medicamento`, `vacuna`, `síntomas`, `prevención`, `cáncer` y `diabetes`.
 
-    data/
-      00_control/               contador e historial de corridas
-      01_candidates/            URLs y títulos obtenidos por la API
-      02_review/                CSV para completar manualmente en Excel
-      03_processed/             corpus binario real listo para entrenar
+El endpoint `latest` puede devolver menos de 12 candidatas nuevas si no existen publicaciones recientes suficientes o si la cuenta alcanza su límite temporal. El reporte registra el resultado real; nunca se inventan URLs ni se reutilizan noticias existentes para completar el cupo.
 
-    reports/
-      runs/                     resumen JSON por corrida
+## Archivos del repositorio
 
-    scripts/
-      00_show_run_history.py    muestra el contador
-      01_collect_newsdata_urls.py
-      02_create_manual_review.py
-      03_export_training_csv.py
+```text
+configs/
+  batch_12.yaml                  seis medios, temas y límites de la corrida
+scripts/
+  01_collect_newsdata_urls.py    punto de entrada ejecutado por Colab
+src/peruvian_medical_misinformation/
+  __init__.py                    definición del paquete
+  newsdata.py                    recolección, normalización y deduplicación
+tests/
+  test_newsdata_batch.py         pruebas del recolector
+  test_batch_12_contract.py      protege los seis medios y el batch 2 × 6
+  test_repository_hygiene.py     evita versionar datos CSV
+docs/
+  data_schema.md                 columnas de Raw y Extraccion
+  methodology.md                 metodología implementada
+data/00_control/                 registro temporal de corridas
+data/01_candidates/              CSV temporal de cada corrida
+reports/runs/                    diagnóstico JSON temporal de cada corrida
+```
 
-Los CSV generados, reportes y la clave API se guardan localmente y están ignorados por Git. El repositorio no versiona ningún CSV del corpus; contiene únicamente código, configuración, documentación y pruebas.
+Los CSV, reportes, credenciales y cuerpos de noticias no se versionan en Git.
 
-## Pasos para obtener datos de la API
+## Ejecución local opcional
 
-### 1. Instalar
+El flujo oficial se ejecuta desde Colab. Estos comandos solo sirven para verificar o probar el recolector localmente.
 
-    make setup
+```bash
+make setup
+make test
+make plan
+```
 
-### 2. Configurar la clave
+Para una corrida local, copia `.env.example` como `.env`, agrega `NEWSDATA_API_KEY` y ejecuta:
 
-    cp .env.example .env
+```bash
+make run EXISTING="/ruta/Excel Revision.xlsx"
+```
 
-Abre .env y escribe la clave en NEWSDATA_API_KEY. No subas ese archivo a Git.
+La opción `EXISTING` debe apuntar a un Excel o CSV con una columna `record_id`. El archivo se usa solo para excluir noticias conocidas.
 
-### 3. Ver el contador de corridas
+## Límites metodológicos
 
-    make history
-
-### 4. Verificar el batch sin usar la API
-
-    make plan
-
-Debe indicar: 12 candidatas = 2 por cada una de 6 fuentes.
-
-### 5. Ejecutar una corrida real
-
-    make run
-
-El script crea automáticamente un identificador como run_002_20260927T.... El número aumenta una vez por cada ejecución real y se registra en data/00_control/run_registry.csv.
-
-La salida queda en:
-
-    data/01_candidates/<run_id>.csv
-    reports/runs/<run_id>.json
-
-Si una fuente no tiene resultados recientes o NewsData limita temporalmente la cuenta, la corrida queda parcial y el JSON lo documenta. Para Latina, el archivo público se consulta sin paginación, pues `robots.txt` bloquea rutas `/page/`. Nunca se inventan URLs.
-
-Para evitar repetir noticias ya presentes, pasa directamente el Excel del equipo (la hoja `Raw` debe contener `record_id`) o un CSV exportado desde Google Sheets:
-
-    make run EXISTING="/ruta/Excel Revision.xlsx"
-
-El archivo debe contener una cabecera `record_id`; en Excel se busca primero la hoja `Raw` y luego cualquier otra hoja que tenga esa columna. El recolector omite esos identificadores, solicita hasta diez resultados por consulta y, cuando una consulta solo devuelve noticias conocidas, continúa con la siguiente palabra médica configurada (`salud`, `medicina`, `enfermedad`, etc.). La lista se mantiene dentro del alcance médico; no se cambia a temas ajenos para completar el cupo.
-
-En Colab, exporta primero los valores de `Raw!B2:B` a un CSV temporal con cabecera `record_id` y pásalo al mismo argumento:
-
-    python scripts/01_collect_newsdata_urls.py \
-      --config configs/batch_12.yaml \
-      --run-id <run_id> \
-      --exclude-record-ids /content/raw_record_ids.csv \
-      --rotate-queries
-
-Antes de anexar la salida a `Raw`, vuelve a leer `Raw!B2:B` y elimina cualquier `record_id` que ya exista. Esta segunda comprobación hace que reejecutar la celda de anexado sea idempotente y evita duplicados si otra persona agregó filas mientras corría la búsqueda.
-
-El recolector procesa primero todos los archivos públicos de Latina y Perú21, que no consumen créditos de NewsData. Luego reparte el presupuesto API por rondas entre los demás medios: todos prueban el tema actual antes de avanzar al siguiente. `--rotate-queries` cambia el primer tema según la cantidad de noticias ya registradas, por lo que las corridas sucesivas no comienzan siempre con `salud`. Si NewsData responde con límite temporal, los archivos públicos ya quedaron procesados y el reporte identifica cuáles medios no pudieron completar su cupo.
-
-### 6. Crear la hoja de revisión manual
-
-Reemplaza <run_id> por el nombre generado en el paso anterior.
-
-    make review RUN_ID=<run_id>
-
-Completa en Excel y guarda como CSV UTF-8:
-
-    is_medical
-    is_claim_eligible
-    body
-    main_medical_claim
-    evidence_source
-    evidence_url
-    label
-    label_reason
-    review_status
-
-### 7. Exportar el corpus real binario
-
-    make export REVIEW=data/02_review/<run_id>_manual_review.csv
-
-El resultado queda en data/03_processed/training_corpus_real.csv. Solo exporta filas médicas con una afirmación verificable (`is_claim_eligible=SI`), completadas, con evidencia documentada y etiqueta 0 o 1. Las notas administrativas, campañas, acceso a servicios o casos sociales se marcan `is_claim_eligible=NO` y no ingresan al corpus.
-
-## Límites del flujo
-
-La API descubre candidatas; la persona investigadora decide si la noticia es médica y registra la evidencia que respalda la etiqueta 0, 1 o EXCLUIDA. La fuente, URL, fecha y autor se conservan para trazabilidad, pero no son variables de entrada del modelo.
-
-Para retomar una corrida parcial después de que NewsData restablezca su cuota:
-
-    make resume FROM=data/01_candidates/<run_id_anterior>.csv
-
-El nuevo archivo conserva las candidatas previas y busca solo los faltantes por medio.
-
-Para ver todos los comandos disponibles:
-
-    make help
+- NewsData y los archivos periodísticos son mecanismos de descubrimiento, no autoridades médicas.
+- `api_query` conserva el tema o archivo que permitió descubrir la candidata.
+- La persona investigadora decide `is_medical` e `is_claim_eligible`.
+- La afirmación, evidencia, etiqueta y elegibilidad final se completan y validan en `Extraccion`.
+- La fuente periodística, la URL, la fecha y el autor se conservan para auditoría, no para predecir la etiqueta.

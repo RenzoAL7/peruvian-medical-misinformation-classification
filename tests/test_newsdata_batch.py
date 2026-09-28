@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pandas as pd
-
 from peruvian_medical_misinformation.newsdata import (
     NewsDataRateLimitError,
     archive_candidates_from_html,
@@ -113,7 +111,6 @@ def test_archive_candidates_support_peru21_card_selector_and_title_preference() 
     assert [(row["title"], row["canonical_url"]) for row in rows] == [
         ("Factores de riesgo para la salud del hígado", "https://peru21.pe/vida/factores-de-riesgo-salud-higado/"),
     ]
-from peruvian_medical_misinformation.review import review_rows, review_to_training_rows
 
 
 def test_collect_candidates_caps_sources_and_filters_domains() -> None:
@@ -521,83 +518,3 @@ def test_run_registry_counts_completed_and_partial_runs(tmp_path) -> None:
     assert next_run_number(rows) == 3
     assert run_status({"expected_total": 12, "collected_total": 12}) == "complete"
     assert run_status({"expected_total": 12, "collected_total": 7}) == "partial_no_results"
-
-
-def test_review_export_only_keeps_complete_binary_human_review() -> None:
-    candidates = [
-        {
-            "run_id": "test_run",
-            "record_id": "one",
-            "source_dataset": "newsdata_rpp",
-            "source_name": "RPP Noticias",
-            "source_domain": "rpp.pe",
-            "url": "https://rpp.pe/salud/uno",
-            "canonical_url": "https://rpp.pe/salud/uno",
-            "title": "Título",
-            "description": "Bajada",
-            "author": "Autora",
-        },
-        {
-            "run_id": "test_run",
-            "record_id": "two",
-            "source_dataset": "newsdata_rpp",
-            "source_name": "RPP Noticias",
-            "url": "https://rpp.pe/politica/dos",
-            "title": "No médica",
-        },
-    ]
-    table = pd.DataFrame(review_rows(candidates))
-    table.loc[0, ["is_medical", "is_claim_eligible", "body", "main_medical_claim"]] = [
-        "SI",
-        "SI",
-        "Cuerpo de la noticia.",
-        "La afirmación médica principal.",
-    ]
-    table.loc[0, ["evidence_source", "evidence_url", "label", "label_reason", "review_status"]] = [
-        "MINSA",
-        "https://www.gob.pe/minsa",
-        "0",
-        "Compatible con la evidencia consultada.",
-        "COMPLETADA",
-    ]
-    table.loc[1, ["is_medical", "review_status"]] = ["NO", "COMPLETADA"]
-
-    rows, errors = review_to_training_rows(table)
-
-    assert errors == []
-    assert rows == [
-        {
-            "record_id": "one",
-            "text": "Título\n\nBajada\n\nCuerpo de la noticia.",
-            "label": "0",
-            "source_dataset": "newsdata_rpp",
-            "source_name": "RPP Noticias",
-            "url": "https://rpp.pe/salud/uno",
-            "published_at": "",
-            "is_synthetic": "false",
-        }
-    ]
-
-
-def test_review_export_excludes_medical_news_without_eligible_claim() -> None:
-    candidates = [
-        {
-            "record_id": "administrative",
-            "source_dataset": "archive_latina",
-            "source_name": "Latina Noticias",
-            "url": "https://latinanoticias.pe/lima/campana_20260901/",
-            "title": "Municipio realizará campaña contra el dengue",
-        }
-    ]
-    table = pd.DataFrame(review_rows(candidates))
-    table.loc[0, ["is_medical", "is_claim_eligible", "review_status", "label"]] = [
-        "SI",
-        "NO",
-        "COMPLETADA",
-        "EXCLUIDA",
-    ]
-
-    rows, errors = review_to_training_rows(table)
-
-    assert rows == []
-    assert errors == []
