@@ -332,6 +332,128 @@ def test_collect_candidates_stops_after_rate_limit() -> None:
     assert summary["per_source"]["latina"]["status"] == "not_requested_after_rate_limit"
 
 
+def test_collect_candidates_finishes_public_archives_before_api_rate_limit() -> None:
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 2,
+            "per_source_limit": 1,
+            "health_queries": ["salud"],
+            "max_requests_per_source": 1,
+            "max_requests_total": 2,
+        },
+        "sources": {
+            "rpp": {"name": "RPP Noticias", "source_dataset": "newsdata_rpp", "domain": "rpp.pe"},
+            "latina": {
+                "name": "Latina Noticias",
+                "source_dataset": "archive_latina",
+                "domain": "latinanoticias.pe",
+                "discovery": "archive",
+                "archive_urls": ["https://latinanoticias.pe/noticias-sobre/salud/"],
+            },
+        },
+    }
+    html = """
+    <section id="principal">
+      <figure class="main-card"><a href="/lima/salud-nueva_20260928/">Salud nueva</a></figure>
+    </section>
+    """
+
+    rows, summary = collect_candidates(
+        config,
+        api_key="secret",
+        run_id="test_run",
+        request_json=lambda *_: (_ for _ in ()).throw(NewsDataRateLimitError("Rate limit exceeded")),
+        request_html=lambda _: html,
+        sleep=lambda _: None,
+    )
+
+    assert [(row["source_id"], row["title"]) for row in rows] == [("latina", "Salud nueva")]
+    assert summary["rate_limited"] is True
+    assert summary["per_source"]["latina"]["status"] == "completed"
+    assert summary["per_source"]["rpp"]["status"] == "rate_limited"
+
+
+def test_collect_candidates_shares_request_budget_between_sources_by_topic_round() -> None:
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 2,
+            "per_source_limit": 1,
+            "health_queries": ["salud", "medicina"],
+            "max_requests_per_source": 2,
+            "max_requests_total": 2,
+        },
+        "sources": {
+            "rpp": {"name": "RPP Noticias", "source_dataset": "newsdata_rpp", "domain": "rpp.pe"},
+            "comercio": {
+                "name": "El Comercio",
+                "source_dataset": "newsdata_el_comercio",
+                "domain": "elcomercio.pe",
+            },
+        },
+    }
+    calls: list[tuple[str, str]] = []
+
+    def empty_request(_: str, params: dict[str, str]) -> dict[str, object]:
+        calls.append((params["domainurl"], params["q"]))
+        return {"status": "success", "results": []}
+
+    rows, summary = collect_candidates(
+        config,
+        api_key="secret",
+        run_id="test_run",
+        request_json=empty_request,
+        sleep=lambda _: None,
+    )
+
+    assert rows == []
+    assert calls == [("rpp.pe", "salud"), ("elcomercio.pe", "salud")]
+    assert summary["request_budget_exhausted"] is True
+    assert summary["per_source"]["rpp"]["api_requests"] == 1
+    assert summary["per_source"]["comercio"]["api_requests"] == 1
+
+
+def test_collect_candidates_rotates_the_first_medical_topic() -> None:
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 1,
+            "per_source_limit": 1,
+            "health_queries": ["salud", "medicina", "cáncer"],
+            "max_requests_per_source": 1,
+            "max_requests_total": 1,
+        },
+        "sources": {
+            "rpp": {"name": "RPP Noticias", "source_dataset": "newsdata_rpp", "domain": "rpp.pe"}
+        },
+    }
+    calls: list[str] = []
+
+    def empty_request(_: str, params: dict[str, str]) -> dict[str, object]:
+        calls.append(params["q"])
+        return {"status": "success", "results": []}
+
+    _, summary = collect_candidates(
+        config,
+        api_key="secret",
+        run_id="test_run",
+        request_json=empty_request,
+        query_offset=1,
+        sleep=lambda _: None,
+    )
+
+    assert calls == ["medicina"]
+    assert summary["query_order"] == ["medicina", "cáncer", "salud"]
+    assert summary["query_offset"] == 1
+
+
 def test_collect_candidates_resumes_from_existing_source_rows() -> None:
     config = {
         "batch": {

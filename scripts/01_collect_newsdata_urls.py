@@ -65,6 +65,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--rotate-queries",
+        action="store_true",
+        help=(
+            "Rota el primer tema médico según la cantidad de record_id excluidos, "
+            "para que corridas sucesivas no comiencen siempre por 'salud'."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Valida y muestra el alcance sin contactar la API.",
@@ -102,6 +110,8 @@ def main() -> int:
     load_local_env(project_path(args.env_file))
     api_key = api_key_from_environment()
     run_id = args.run_id or f"run_{run_number:03d}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    query_count = len([query for query in batch["health_queries"] if str(query).strip()])
+    query_offset = len(excluded_record_ids) % query_count if args.rotate_queries and query_count else 0
 
     rows, summary = collect_candidates(
         config,
@@ -111,6 +121,7 @@ def main() -> int:
         request_html=httpx_html_request(float(batch["timeout_seconds"])),
         seeded_rows=seeded_rows,
         excluded_record_ids=excluded_record_ids,
+        query_offset=query_offset,
     )
     summary["config_path"] = str(config_path.relative_to(REPOSITORY_ROOT))
     summary["executed_at"] = datetime.now(timezone.utc).isoformat()
@@ -148,6 +159,7 @@ def main() -> int:
 
     print(f"Corrida #{run_number}: {run_id}")
     print(f"Candidatas guardadas: {len(rows)}/{batch['expected_total']} en {candidates_path}")
+    print("Orden de temas médicos: " + ", ".join(summary["query_order"]))
     if summary["seeded_total"]:
         print(f"Candidatas conservadas desde una corrida previa: {summary['seeded_total']}")
     if summary["duplicates_skipped_total"]:
@@ -156,7 +168,11 @@ def main() -> int:
             f"{summary['duplicates_skipped_total']}; se probaron consultas médicas alternativas."
         )
     for source_id, counts in summary["per_source"].items():
-        print(f"- {source_id}: {counts['collected']}/{counts['requested']}")
+        topics = ", ".join(counts["queries_attempted"]) or "sin consultas API"
+        print(
+            f"- {source_id}: {counts['collected']}/{counts['requested']} "
+            f"[{counts['status']}]; temas: {topics}"
+        )
     if summary["shortfall_total"]:
         print("La API no devolvió suficientes candidatas para completar el batch; no se inventaron URLs.")
     if summary["rate_limited"]:
