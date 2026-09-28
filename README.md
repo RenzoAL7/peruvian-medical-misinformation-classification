@@ -1,6 +1,6 @@
 # Corpus de noticias médicas peruanas
 
-Este repositorio contiene únicamente el recolector utilizado por el [notebook de Google Colab](https://colab.research.google.com/drive/1he9_gDLiOBVrkqHuK1PynkTCps4_6OeN). Su función es descubrir noticias candidatas y conservar su trazabilidad. No decide si una noticia es médica ni asigna etiquetas de veracidad.
+Este repositorio contiene únicamente el recolector utilizado por el notebook de Google Colab del proyecto. Su función es descubrir noticias candidatas y conservar su trazabilidad. No decide si una noticia es médica ni asigna etiquetas de veracidad.
 
 ## Flujo vigente
 
