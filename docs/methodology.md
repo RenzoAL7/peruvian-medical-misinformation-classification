@@ -1,25 +1,25 @@
-# Metodología de Seminario 1
+# Metodología implementada en Seminario 1
 
-## Alcance
+## 1. Descubrimiento de candidatas
 
-La primera entrega construye un flujo reproducible para reunir y revisar noticias peruanas candidatas. La unidad inicial es una URL pública con título y metadatos; una fila solo se transforma en ejemplo de entrenamiento después de la revisión manual. No se entrena ningún clasificador en esta fase.
+El Colab obtiene los `record_id` ya registrados en `Raw` y ejecuta el recolector del repositorio. La configuración solicita hasta dos candidatas de cada uno de seis medios peruanos: El Comercio, RPP Noticias, Latina Noticias, El Peruano, Perú21 y La República.
 
-## Adquisición por lotes
+Latina y Perú21 se procesan primero mediante sus archivos públicos. Los demás medios usan el endpoint `latest` de NewsData con idioma español, país Perú, categoría `health` y diez términos médicos. Las consultas se reparten por rondas entre los medios pendientes y el primer término rota según la cantidad de identificadores ya registrados.
 
-La configuración configs/batch_12.yaml define un batch de 12 candidatas: 2 por cada uno de seis medios peruanos (elcomercio.pe, rpp.pe, latinanoticias.pe, elperuano.pe, peru21.pe y larepublica.pe). El script consulta el endpoint latest de NewsData.io con filtros de dominio, idioma español, país Perú, categoría de salud y términos médicos en español. Latina Noticias descubre enlaces desde los archivos públicos de Salud y Medicina; Perú21 lo hace desde las dos primeras páginas públicas de su archivo de Salud. Ambas usan NewsData como respaldo si sus archivos no entregan dos URLs. Conserva el identificador de corrida, consulta o archivo de origen, fecha de recuperación, URL original y URL canónica. La API puede devolver menos de dos resultados para una fuente durante su ventana reciente; el sistema registra el faltante y no lo rellena con URLs de otro medio ni con datos fabricados.
+Cada URL se normaliza y se transforma en un `record_id`. Las coincidencias con `Raw` se descartan durante la búsqueda. Antes de anexar, el Colab vuelve a leer la hoja y aplica una segunda deduplicación.
 
-La corrida limita sus solicitudes totales y se detiene ante una respuesta 429. Esto respeta la cuota del proveedor y evita insistir sobre un límite temporal. Cuando una corrida queda parcial, el parámetro --resume-from conserva sus URLs válidas, marca su run_id de origen y solicita únicamente las candidatas faltantes en una ejecución posterior.
+## 2. Revisión humana en Raw
 
-La API se usa solo para descubrimiento. En particular, el batch no extrae el cuerpo de cada página, no infiere que una noticia sea médica por el sitio donde se publicó y no asigna etiquetas de veracidad. Esta separación evita que la fuente periodística o la clasificación comercial de la API se conviertan en una señal indebida del modelo posterior.
+Las candidatas ingresan con estado `PENDIENTE`. El investigador determina si la noticia es médica, registra la razón y decide si contiene una afirmación médica concreta y contrastable. Campañas, anuncios administrativos, infraestructura, acceso a servicios y relatos sin una afirmación verificable se excluyen de la etapa de etiquetado.
 
-## Revisión humana y etiquetado
+## 3. Extracción del cuerpo
 
-Después de cada corrida, 02_create_manual_review.py genera una hoja CSV. El investigador primero decide si la candidata trata salud o medicina. Las filas NO se conservan como descarte temático. Para una fila SI, el investigador agrega el cuerpo, delimita una afirmación médica principal y busca evidencia adecuada, por ejemplo en MINSA, INS, EsSalud, OMS/OPS o PubMed. Luego registra la fuente, URL, fragmento, justificación y una etiqueta manual: 0 si la afirmación es compatible con la evidencia, 1 si está contradicha, o EXCLUIDA si no puede verificarse, es ambigua o no permite aislar una sola afirmación.
+El Colab selecciona todas las filas con `is_medical=SI`, `is_claim_eligible=SI` y `review_status=COMPLETADA` que todavía no aparecen en `Extraccion`. Descarga la página con HTTPX, intenta extraer el texto con Trafilatura y usa BeautifulSoup como respaldo. El estado de extracción y el método quedan registrados.
 
-La etiqueta no la produce un LLM ni se deduce del medio. 03_export_training_csv.py solo acepta filas médicas completadas, con evidencia documentada y etiqueta binaria. Además normaliza Unicode NFKC, espacios y el texto title + subtitle_or_bajada + body, y elimina duplicados exactos por URL canónica o contenido. Evidencia, autor, fecha, URL y fuente quedan como metadatos, no como características de entrada.
+## 4. Validación con evidencia
 
-## Preparación posterior
+En `Extraccion`, el investigador delimita la afirmación principal y la contrasta con fuentes especializadas como MINSA, INS, EsSalud, OMS/OPS, PubMed u otra autoridad pertinente. Registra evidencia, justificación, etiqueta, revisor y estado de validación. Ni NewsData ni el medio periodístico determinan la etiqueta.
 
-El balance de clases se evaluará únicamente después de terminar la revisión y deduplicación de noticias reales. Cualquier generación sintética, si se aprueba en una fase posterior, se documentará de forma separada, se marcará con is_synthetic=true y no deberá incorporarse en validación ni prueba. Después se dividirán solo los registros reales con etiquetas 0 y 1 en 70 % entrenamiento, 15 % validación y 15 % prueba, conservando el conjunto de prueba para evaluación final.
+## 5. Alcance actual
 
-La siguiente etapa comparará TF-IDF con Naive Bayes, Regresión Logística y SVM lineal; GloVe con BiLSTM; Word2Vec con LSTM; y BERT, BETO y RoBERTa-BNE. Las métricas se calcularán una vez cerrado el corpus, sin usar los metadatos de procedencia para predecir la etiqueta.
+El repositorio cubre adquisición, trazabilidad y deduplicación. El Colab cubre integración con Google Sheets y extracción del cuerpo. Todavía no se exporta automáticamente el corpus final ni se entrenan clasificadores; esas actividades corresponden a una etapa posterior, una vez cerrada la validación humana.
