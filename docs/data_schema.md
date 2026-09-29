@@ -4,57 +4,46 @@ Google Sheets es el espacio de trabajo del corpus. El flujo sigue una organizaci
 
 ## Bronze
 
-Una fila representa una noticia candidata todavía no validada.
+Una fila representa una noticia candidata todavía no validada. Se mantienen solo nueve campos:
 
 | Campo | Uso |
 | --- | --- |
-| `run_id` | Corrida que descubrió la candidata. |
 | `record_id` | Hash estable de la URL canónica; se usa para deduplicar. |
-| `source_dataset`, `source_name`, `source_domain` | Procedencia y medio. |
-| `url`, `canonical_url` | URL recibida y versión normalizada sin rastreadores. |
+| `source_name` | Medio o institución de procedencia. |
+| `canonical_url` | URL normalizada que permite volver a la noticia original. |
 | `published_at` | Fecha publicada cuando la fuente la entrega. |
-| `title`, `subtitle_or_bajada`, `author` | Metadatos editoriales. |
-| `newsdata_article_id` | Identificador de NewsData, vacío para archivos públicos. |
-| `api_query` | Tema consultado o URL del archivo público. |
+| `title`, `subtitle_or_bajada` | Texto visible para decidir si la candidata merece revisión. |
+| `topic` | Tema o archivo público que permitió descubrirla. |
+| `selection_status` | `PENDIENTE`, `INCLUIR`, `EXCLUIR_NO_MEDICA`, `EXCLUIR_SIN_AFIRMACION` o `EXCLUIR_SIN_TEXTO`. |
 | `retrieved_at` | Fecha UTC de recuperación. |
-| `is_medical` | `SI`, `NO` o `PENDIENTE`, decidido por revisión humana. |
-| `medical_relevance_reason` | Justificación breve de inclusión o descarte. |
-| `is_claim_eligible` | Indica si existe una afirmación médica concreta y verificable. |
-| `review_status` | Estado de la revisión de la candidata. |
 
 El Colab elimina duplicados dentro de la corrida y vuelve a consultar los `record_id` existentes inmediatamente antes de anexar.
 
 ## Silver
 
-Solo recibe filas de `Bronze` con `is_medical=SI`, `is_claim_eligible=SI` y `review_status=COMPLETADA`. Conserva la trazabilidad anterior y añade:
+Solo recibe filas de `Bronze` con `selection_status=INCLUIR` y un cuerpo de al menos 150 palabras y 800 caracteres. Se limita a doce campos:
 
 | Campo | Uso |
 | --- | --- |
+| `record_id`, `source_name`, `topic`, `title`, `canonical_url` | Identidad y trazabilidad mínima de la noticia. |
 | `body` | Texto principal descargado desde la URL pública. |
-| `http_status` | Código HTTP obtenido. |
-| `extraction_method` | `trafilatura`, respaldo con BeautifulSoup o ausencia de extracción. |
-| `extraction_status` | `OK`, `CUERPO_INSUFICIENTE` o error de descarga. |
-| `extracted_at` | Fecha UTC de extracción. |
 | `main_medical_claim` | Afirmación médica principal delimitada manualmente. |
-| `evidence_source`, `evidence_url`, `evidence_excerpt` | Evidencia usada para contrastar la afirmación. |
-| `label`, `label_reason` | Etiqueta manual y su justificación. |
-| `final_training_eligible` | Decisión final de inclusión en el corpus binario. |
-| `reviewer`, `validation_status`, `validated_at` | Responsable y trazabilidad de validación. |
+| `label` | `PENDIENTE`, `RESPALDADA`, `REFUTADA`, `NO_CONCLUYENTE` o `EXCLUIDA`. |
+| `evidence_url` | Fuente especializada usada para contrastar la afirmación. |
+| `verification_note` | Explicación breve de por qué la evidencia respalda, refuta o no permite concluir. |
+| `reviewer`, `validation_status` | Responsable y estado `PENDIENTE` o `COMPLETADA`. |
 
-La extracción del cuerpo no asigna una etiqueta. Las decisiones médicas y de veracidad siguen siendo humanas y basadas en evidencia.
-Un cuerpo necesita al menos 150 palabras y 800 caracteres para quedar con `extraction_status=OK`; de lo contrario, el Colab fija `final_training_eligible=NO` por insuficiencia técnica.
+La extracción del cuerpo no asigna una etiqueta. Si el texto no alcanza el mínimo, no se crea una fila en Silver y Bronze cambia a `EXCLUIR_SIN_TEXTO`. Las decisiones médicas y de veracidad siguen siendo humanas y basadas en evidencia.
 
 ## Gold
 
 Es una salida generada y no debe editarse manualmente. Solo incluye noticias de `Silver` que cumplen simultáneamente:
 
-- `extraction_status=OK`;
-- `final_training_eligible=SI`;
 - `validation_status=COMPLETADA`;
 - etiqueta binaria `RESPALDADA` o `REFUTADA`;
-- fuente, URL y extracto de evidencia no vacíos.
+- `body`, `main_medical_claim` y `evidence_url` no vacíos.
 
-Una fila por `record_id` conserva los campos utilizados para auditoría y entrenamiento: procedencia, URL canónica, fecha, título, bajada, autor, cuerpo, afirmación, evidencia, etiqueta, justificación, revisor y fecha de validación. `dataset_split` permanece vacío hasta aplicar la partición estratificada 70/15/15.
+Una fila por `record_id` conserva siete campos: `record_id`, `topic`, `source_name`, `title`, `body`, `label` y `dataset_split`. Para entrenar, se concatena `title + body` como entrada y se usa `label` como objetivo. `source_name` y `topic` no son variables predictoras. `dataset_split` permanece vacío hasta aplicar la partición estratificada 70/15/15.
 
 ## Artefactos temporales
 

@@ -8,9 +8,10 @@ Este repositorio contiene únicamente el recolector utilizado por el notebook de
 2. Ejecuta `scripts/01_collect_newsdata_urls.py` y le pasa esos identificadores para evitar repeticiones.
 3. El recolector carga `configs/batch.yaml`, consulta secciones públicas de salud y guarda un CSV temporal de candidatas.
 4. El Colab vuelve a comprobar los identificadores y anexa a `Bronze` únicamente las noticias nuevas.
-5. El investigador revisa manualmente relevancia médica y elegibilidad de la afirmación.
-6. El Colab descarga el cuerpo de las filas aprobadas y las agrega a `Silver` para la posterior validación con evidencia.
-7. El Colab reconstruye `Gold` únicamente con noticias validadas, etiquetadas y aprobadas para entrenamiento.
+5. El investigador decide una sola columna en `Bronze`: `selection_status`.
+6. El Colab descarga el cuerpo de las filas `INCLUIR`; las que no tienen texto suficiente se marcan `EXCLUIR_SIN_TEXTO`.
+7. En `Silver` se registra la afirmación, evidencia, nota de verificación, etiqueta, revisor y estado de validación.
+8. El Colab reconstruye `Gold` únicamente con noticias validadas y listas para entrenamiento.
 
 ## Medios y método de descubrimiento
 
@@ -98,9 +99,9 @@ La opción `EXISTING` debe apuntar a un Excel o CSV con una columna `record_id`.
 ## Límites metodológicos
 
 - NewsData y los archivos periodísticos son mecanismos de descubrimiento, no autoridades médicas.
-- `api_query` conserva el tema o archivo que permitió descubrir la candidata.
-- La persona investigadora decide `is_medical` e `is_claim_eligible`.
-- La afirmación, evidencia, etiqueta y elegibilidad final se completan y validan en `Silver`.
-- `Gold` contiene únicamente registros con extracción correcta, evidencia completa, etiqueta `RESPALDADA` o `REFUTADA`, validación completada y elegibilidad final aprobada.
-- La fuente periodística, la URL, la fecha y el autor se conservan para auditoría, no para predecir la etiqueta.
+- `topic` conserva el tema o archivo que permitió descubrir la candidata.
+- En `Bronze`, `selection_status` resume la decisión de incluir o excluir y su motivo principal.
+- La afirmación, URL de evidencia, nota de verificación y etiqueta se completan y validan en `Silver`.
+- `Gold` contiene únicamente registros con cuerpo, afirmación, evidencia, etiqueta `RESPALDADA` o `REFUTADA` y validación completada.
+- Para entrenar, la entrada será `title + body` y el objetivo será `label`; `source_name` y `topic` se conservan solo para análisis y auditoría.
 - El historial de fuentes aceptadas y descartadas está documentado en `docs/source_audit.md`.
