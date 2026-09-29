@@ -6,6 +6,7 @@ from peruvian_medical_misinformation.newsdata import (
     NewsDataRateLimitError,
     archive_candidates_from_html,
     append_run_registry,
+    candidate_rejection_reason,
     canonicalize_url,
     collect_candidates,
     next_run_number,
@@ -14,6 +15,34 @@ from peruvian_medical_misinformation.newsdata import (
     record_id,
     run_status,
 )
+
+
+def test_excluded_topic_matches_words_not_substrings() -> None:
+    batch = {
+        "candidate_keywords": ["cáncer"],
+        "candidate_claim_keywords": ["riesgo"],
+        "excluded_candidate_keywords": ["actor"],
+    }
+    source = {"article_url_prefixes": ["/salud/"]}
+
+    assert (
+        candidate_rejection_reason(
+            url="https://example.test/salud/factores-cancer/",
+            title="Factores que aumentan el riesgo de cáncer",
+            source=source,
+            batch=batch,
+        )
+        is None
+    )
+    assert (
+        candidate_rejection_reason(
+            url="https://example.test/salud/actor-cancer/",
+            title="Actor comenta un riesgo de cáncer",
+            source=source,
+            batch=batch,
+        )
+        == "excluded_topic"
+    )
 
 
 def test_archive_candidates_keep_article_links_and_ignore_navigation() -> None:
@@ -167,6 +196,59 @@ def test_collect_candidates_caps_sources_and_filters_domains() -> None:
     assert all(call["domainurl"] in {"rpp.pe", "elcomercio.pe"} for call in calls)
     assert summary["shortfall_total"] == 0
     assert summary["total_requests"] == 2
+
+
+def test_collect_candidates_uses_global_target_with_round_robin_diversity() -> None:
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 3,
+            "per_source_limit": 2,
+            "health_queries": ["salud"],
+        },
+        "sources": {
+            "uno": {
+                "name": "Uno",
+                "source_dataset": "archive_uno",
+                "domain": "uno.test",
+                "discovery": "archive",
+                "archive_urls": ["https://uno.test/salud/"],
+                "article_url_prefixes": ["/salud/"],
+            },
+            "dos": {
+                "name": "Dos",
+                "source_dataset": "archive_dos",
+                "domain": "dos.test",
+                "discovery": "archive",
+                "archive_urls": ["https://dos.test/salud/"],
+                "article_url_prefixes": ["/salud/"],
+            },
+        },
+    }
+
+    def html_for(url: str) -> str:
+        domain = "uno.test" if "uno.test" in url else "dos.test"
+        return f"""
+        <a href="https://{domain}/salud/primera/">Primera noticia de salud</a>
+        <a href="https://{domain}/salud/segunda/">Segunda noticia de salud</a>
+        """
+
+    rows, summary = collect_candidates(
+        config,
+        api_key="",
+        run_id="test_run",
+        request_json=lambda *_: (_ for _ in ()).throw(AssertionError("No debe llamar a la API")),
+        request_html=html_for,
+        sleep=lambda _: None,
+    )
+
+    assert len(rows) == 3
+    assert summary["collected_total"] == 3
+    assert summary["per_source"]["uno"]["eligible_discovered"] == 2
+    assert summary["per_source"]["dos"]["eligible_discovered"] == 2
+    assert {row["source_id"] for row in rows} == {"uno", "dos"}
 
 
 def test_collect_candidates_skips_sheet_duplicates_and_tries_next_query() -> None:

@@ -13,7 +13,9 @@ Este repositorio contiene únicamente el recolector utilizado por el notebook de
 
 ## Medios y método de descubrimiento
 
-Cada corrida intenta obtener hasta 12 candidatas textuales: 3 por cada medio.
+Cada corrida intenta obtener hasta 12 candidatas textuales desde un conjunto
+amplio de fuentes. Cada fuente aporta como máximo 2 noticias y la selección
+final se hace por rondas, para evitar que un solo portal domine el lote.
 
 | Medio | Sección pública verificada |
 | --- | --- |
@@ -21,8 +23,20 @@ Cada corrida intenta obtener hasta 12 candidatas textuales: 3 por cada medio.
 | La República | `salud` |
 | Diario Correo | `salud` |
 | Diario Ojo | `salud` |
+| MINSA | `institucion/minsa/noticias` |
+| Gestión | etiqueta `salud` |
+| El Popular | `vida` |
+| Canal N | etiqueta `salud` |
 
-Las cuatro secciones fueron comprobadas con `robots.txt` y con extracción real de cuerpos. El recolector acepta únicamente URLs internas de esas secciones y exige que el título o bajada contenga un término médico y una señal de afirmación contrastable. Las candidatas se deduplican por URL canónica y `record_id`.
+Las páginas se comprobaron con `robots.txt` y acceso real. El recolector acepta
+únicamente enlaces internos descubiertos en esas páginas y exige que el título
+o bajada contenga un término médico y una señal de afirmación contrastable. Las
+candidatas se deduplican por URL canónica y `record_id`.
+
+MINSA se registra con `source_dataset=archive_minsa_institucional`, porque es
+una fuente institucional y no un medio periodístico. Sus comunicados son
+candidatas útiles, pero no reciben automáticamente la etiqueta de verdadero ni
+reemplazan la validación independiente con evidencia.
 
 La configuración vigente no consume créditos de NewsData. La integración se conserva para pruebas futuras y, si se vuelve a habilitar, aplica `video=0`, `removeduplicate=1`, máximo 2 solicitudes por fuente y máximo 4 por corrida para proteger el plan gratuito.
 
@@ -32,7 +46,7 @@ Una corrida puede devolver menos de 12 candidatas nuevas si las páginas no cont
 
 ```text
 configs/
-  batch_12.yaml                  seis medios, temas y límites de la corrida
+  batch_12.yaml                  fuentes, temas y límites de la corrida
 scripts/
   01_collect_newsdata_urls.py    punto de entrada ejecutado por Colab
 src/peruvian_medical_misinformation/
@@ -40,7 +54,7 @@ src/peruvian_medical_misinformation/
   newsdata.py                    recolección, normalización y deduplicación
 tests/
   test_newsdata_batch.py         pruebas del recolector
-  test_batch_12_contract.py      protege los seis medios y el batch 2 × 6
+  test_batch_12_contract.py      protege las fuentes y la meta global del batch
   test_repository_hygiene.py     evita versionar datos CSV
 docs/
   data_schema.md                 columnas de Raw y Extraccion
@@ -77,3 +91,4 @@ La opción `EXISTING` debe apuntar a un Excel o CSV con una columna `record_id`.
 - La persona investigadora decide `is_medical` e `is_claim_eligible`.
 - La afirmación, evidencia, etiqueta y elegibilidad final se completan y validan en `Extraccion`.
 - La fuente periodística, la URL, la fecha y el autor se conservan para auditoría, no para predecir la etiqueta.
+- El historial de fuentes aceptadas y descartadas está documentado en `docs/source_audit.md`.

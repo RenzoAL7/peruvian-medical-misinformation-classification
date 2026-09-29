@@ -1,4 +1,5 @@
-# Batch de 12 candidatas textuales: 3 por cada sección médica verificada.
+# Batch diverso de 12 candidatas textuales. Cada fuente puede aportar como
+# máximo 2 noticias; si una página no rinde, las demás cubren el lote.
 # Estas páginas públicas están permitidas por robots.txt y no consumen créditos
 # de NewsData. El endpoint permanece configurado para pruebas futuras.
 batch:
@@ -8,7 +9,7 @@ batch:
   report_dir: reports/runs
   run_registry_path: data/00_control/run_registry.csv
   expected_total: 12
-  per_source_limit: 3
+  per_source_limit: 2
   language: es
   country: pe
   category: health
@@ -91,10 +92,6 @@ batch:
   excluded_candidate_keywords:
     - farándula
     - espectáculo
-    - futbolista
-    - cantante
-    - actor
-    - actriz
     - congresista
     - elecciones
     - horóscopo
@@ -145,3 +142,46 @@ sources:
     article_link_selector: "a[href*='/salud/']"
     article_url_prefixes:
       - /salud/
+
+  minsa:
+    name: Ministerio de Salud
+    source_dataset: archive_minsa_institucional
+    domain: www.gob.pe
+    discovery: archive
+    archive_urls:
+      - https://www.gob.pe/institucion/minsa/noticias?filter%5Btype%5D=3
+    article_link_selector: "a[href^='/institucion/minsa/noticias/']"
+    article_url_prefixes:
+      - /institucion/minsa/noticias/
+
+  gestion:
+    name: Gestión
+    source_dataset: archive_gestion_salud
+    domain: gestion.pe
+    discovery: archive
+    archive_urls:
+      - https://gestion.pe/noticias/salud/
+    article_link_selector: "a[href*='-noticia/']"
+    article_url_prefixes:
+      - /peru/
+
+  el_popular:
+    name: El Popular
+    source_dataset: archive_el_popular_vida
+    domain: elpopular.pe
+    discovery: archive
+    archive_urls:
+      - https://elpopular.pe/vida/
+    article_link_selector: "a[href*='/vida/']"
+    article_url_prefixes:
+      - /vida/
+
+  canal_n:
+    name: Canal N
+    source_dataset: archive_canal_n_salud
+    domain: canaln.pe
+    discovery: archive
+    archive_urls:
+      - https://canaln.pe/noticias/salud
+    article_link_selector: "a[href*='/actualidad/']"
+    allow_selected_article_urls: true

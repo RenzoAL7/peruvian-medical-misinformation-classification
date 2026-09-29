@@ -2,11 +2,11 @@
 
 ## 1. Descubrimiento de candidatas
 
-El Colab obtiene los `record_id` ya registrados en `Raw` y ejecuta el recolector del repositorio. La configuración solicita hasta tres candidatas de cada una de cuatro secciones textuales de salud: El Comercio, La República, Diario Correo y Diario Ojo.
+El Colab obtiene los `record_id` ya registrados en `Raw` y ejecuta el recolector del repositorio. La configuración busca una meta global de 12 candidatas en El Comercio, La República, Diario Correo, Diario Ojo, MINSA, Gestión, El Popular y Canal N. Cada fuente puede aportar como máximo dos candidatas.
 
-Las cuatro fuentes se descubren desde páginas públicas permitidas por `robots.txt`, por lo que la corrida vigente no consume créditos de NewsData. Antes de conservar una URL se valida que pertenezca a la sección autorizada y que el título o bajada incluya un término médico y una señal de afirmación contrastable. La integración opcional con NewsData permanece limitada a cuatro solicitudes por corrida y excluye resultados de video.
+Las fuentes se descubren desde páginas públicas permitidas por `robots.txt`, por lo que la corrida vigente no consume créditos de NewsData. Antes de conservar una URL se valida que pertenezca al medio autorizado y que el título o bajada incluya un término médico y una señal de afirmación contrastable. La selección final rota el primer medio según la cantidad de registros existentes y toma una noticia por fuente en cada ronda. La integración opcional con NewsData permanece limitada a cuatro solicitudes por corrida, excluye resultados de video y se detiene al alcanzar la meta global.
 
-Cada URL se normaliza y se transforma en un `record_id`. Las coincidencias con `Raw` se descartan durante la búsqueda. Antes de anexar, el Colab vuelve a leer la hoja y aplica una segunda deduplicación. Latina, El Peruano, Perú21 y RPP no se incluyen en la configuración vigente: las pruebas reales mostraron ruido temático, ausencia de resultados, restricciones de automatización o cuerpos demasiado breves.
+Cada URL se normaliza y se transforma en un `record_id`. Las coincidencias con `Raw` se descartan durante la búsqueda. Antes de anexar, el Colab vuelve a leer la hoja y aplica una segunda deduplicación. La ampliación no significa aceptar cualquier nota: los medios o formatos que no permiten automatización, devuelven videos o producen cuerpos insuficientes permanecen fuera hasta que una nueva prueba documentada justifique incorporarlos.
 
 ## 2. Revisión humana en Raw
 
@@ -18,7 +18,7 @@ El Colab selecciona todas las filas con `is_medical=SI`, `is_claim_eligible=SI` 
 
 ## 4. Validación con evidencia
 
-En `Extraccion`, el investigador delimita la afirmación principal y la contrasta con fuentes especializadas como MINSA, INS, EsSalud, OMS/OPS, PubMed u otra autoridad pertinente. Registra evidencia, justificación, etiqueta, revisor y estado de validación. Ni NewsData ni el medio periodístico determinan la etiqueta.
+En `Extraccion`, el investigador delimita la afirmación principal y la contrasta con fuentes especializadas como MINSA, INS, EsSalud, OMS/OPS, PubMed u otra autoridad pertinente. Registra evidencia, justificación, etiqueta, revisor y estado de validación. Ni NewsData ni el medio periodístico determinan la etiqueta. Cuando la candidata proviene de MINSA, la evidencia confirmatoria debe registrarse con una función independiente y no asumirse a partir del dominio.
 
 ## 5. Alcance actual
 

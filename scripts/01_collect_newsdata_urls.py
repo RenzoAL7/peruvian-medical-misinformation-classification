@@ -97,8 +97,8 @@ def main() -> int:
         print(f"Siguiente corrida registrada: #{run_number}")
         print(
             "Configuración válida: "
-            f"{batch['expected_total']} candidatas = "
-            f"{batch['per_source_limit']} por cada una de {len(sources)} fuentes."
+            f"meta global de {batch['expected_total']} candidatas; "
+            f"máximo {batch['per_source_limit']} por cada una de {len(sources)} fuentes."
         )
         if seeded_rows:
             print(f"La reanudación conservaría {len(seeded_rows)} candidatas previas.")
@@ -186,7 +186,8 @@ def main() -> int:
     for source_id, counts in summary["per_source"].items():
         topics = ", ".join(counts["queries_attempted"]) or "sin consultas API"
         print(
-            f"- {source_id}: {counts['collected']}/{counts['requested']} "
+            f"- {source_id}: {counts['collected']} seleccionadas de "
+            f"{counts['eligible_discovered']} elegibles (máximo {counts['requested']}) "
             f"[{counts['status']}]; temas: {topics}"
         )
     if summary["shortfall_total"]:
