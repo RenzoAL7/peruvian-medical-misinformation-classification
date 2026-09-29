@@ -1,8 +1,8 @@
 # Esquema de datos vigente
 
-Google Sheets es el espacio de trabajo del corpus. El repositorio genera únicamente artefactos temporales para alimentar las pestañas `Raw` y `Extraccion`.
+Google Sheets es el espacio de trabajo del corpus. El flujo sigue una organización Medallion con las pestañas `Bronze`, `Silver` y `Gold`.
 
-## Raw
+## Bronze
 
 Una fila representa una noticia candidata todavía no validada.
 
@@ -24,9 +24,9 @@ Una fila representa una noticia candidata todavía no validada.
 
 El Colab elimina duplicados dentro de la corrida y vuelve a consultar los `record_id` existentes inmediatamente antes de anexar.
 
-## Extraccion
+## Silver
 
-Solo recibe filas de `Raw` con `is_medical=SI`, `is_claim_eligible=SI` y `review_status=COMPLETADA`. Conserva la trazabilidad anterior y añade:
+Solo recibe filas de `Bronze` con `is_medical=SI`, `is_claim_eligible=SI` y `review_status=COMPLETADA`. Conserva la trazabilidad anterior y añade:
 
 | Campo | Uso |
 | --- | --- |
@@ -43,6 +43,18 @@ Solo recibe filas de `Raw` con `is_medical=SI`, `is_claim_eligible=SI` y `review
 
 La extracción del cuerpo no asigna una etiqueta. Las decisiones médicas y de veracidad siguen siendo humanas y basadas en evidencia.
 Un cuerpo necesita al menos 150 palabras y 800 caracteres para quedar con `extraction_status=OK`; de lo contrario, el Colab fija `final_training_eligible=NO` por insuficiencia técnica.
+
+## Gold
+
+Es una salida generada y no debe editarse manualmente. Solo incluye noticias de `Silver` que cumplen simultáneamente:
+
+- `extraction_status=OK`;
+- `final_training_eligible=SI`;
+- `validation_status=COMPLETADA`;
+- etiqueta binaria `RESPALDADA` o `REFUTADA`;
+- fuente, URL y extracto de evidencia no vacíos.
+
+Una fila por `record_id` conserva los campos utilizados para auditoría y entrenamiento: procedencia, URL canónica, fecha, título, bajada, autor, cuerpo, afirmación, evidencia, etiqueta, justificación, revisor y fecha de validación. `dataset_split` permanece vacío hasta aplicar la partición estratificada 70/15/15.
 
 ## Artefactos temporales
 

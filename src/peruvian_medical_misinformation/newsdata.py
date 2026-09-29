@@ -827,9 +827,16 @@ def read_record_ids(path: str | Path) -> set[str]:
 
         workbook = load_workbook(source, read_only=True, data_only=True)
         worksheets = list(workbook.worksheets)
-        if "Raw" in workbook.sheetnames:
-            raw_sheet = workbook["Raw"]
-            worksheets = [raw_sheet, *(sheet for sheet in worksheets if sheet.title != "Raw")]
+        preferred_sheet = next(
+            (name for name in ("Bronze", "Raw") if name in workbook.sheetnames),
+            None,
+        )
+        if preferred_sheet:
+            bronze_sheet = workbook[preferred_sheet]
+            worksheets = [
+                bronze_sheet,
+                *(sheet for sheet in worksheets if sheet.title != preferred_sheet),
+            ]
         try:
             for worksheet in worksheets:
                 rows = worksheet.iter_rows(values_only=True)

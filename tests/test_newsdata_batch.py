@@ -390,13 +390,13 @@ def test_read_record_ids_from_sheet_export(tmp_path) -> None:
     assert read_record_ids(exported) == {"abc", "def"}
 
 
-def test_read_record_ids_from_excel_raw_sheet(tmp_path) -> None:
+def test_read_record_ids_from_excel_bronze_sheet(tmp_path) -> None:
     from openpyxl import Workbook
 
     exported = tmp_path / "revision.xlsx"
     workbook = Workbook()
     worksheet = workbook.active
-    worksheet.title = "Raw"
+    worksheet.title = "Bronze"
     worksheet.append(["run_id", "record_id", "title"])
     worksheet.append(["run_1", "abc", "Uno"])
     worksheet.append(["run_2", "abc", "Duplicada"])
@@ -404,6 +404,20 @@ def test_read_record_ids_from_excel_raw_sheet(tmp_path) -> None:
     workbook.save(exported)
 
     assert read_record_ids(exported) == {"abc", "def"}
+
+
+def test_read_record_ids_from_legacy_raw_sheet(tmp_path) -> None:
+    from openpyxl import Workbook
+
+    exported = tmp_path / "revision_legacy.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Raw"
+    worksheet.append(["run_id", "record_id", "title"])
+    worksheet.append(["run_1", "abc", "Uno"])
+    workbook.save(exported)
+
+    assert read_record_ids(exported) == {"abc"}
 
 
 def test_collect_candidates_stops_after_rate_limit() -> None:
