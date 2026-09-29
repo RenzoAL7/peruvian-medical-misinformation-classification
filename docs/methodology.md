@@ -8,6 +8,8 @@ Las fuentes se descubren desde páginas públicas permitidas por `robots.txt`, p
 
 Cada URL se normaliza y se transforma en un `record_id`. Las coincidencias con `Raw` se descartan durante la búsqueda. Antes de anexar, el Colab vuelve a leer la hoja y aplica una segunda deduplicación. La ampliación no significa aceptar cualquier nota: los medios o formatos que no permiten automatización, devuelven videos o producen cuerpos insuficientes permanecen fuera hasta que una nueva prueba documentada justifique incorporarlos.
 
+La frecuencia operativa recomendada es una corrida cada 24 horas. Si no hay suficientes URLs nuevas, se espera 48 horas. La pausa de un segundo configurada en `request_delay_seconds` regula solicitudes dentro de la misma corrida y no representa el intervalo entre corridas. Para ampliar el corpus histórico se incorporará paginación o búsqueda por fechas; no se resolverá repitiendo de inmediato la misma portada.
+
 ## 2. Revisión humana en Raw
 
 Las candidatas ingresan con estado `PENDIENTE`. El investigador determina si la noticia es médica, registra la razón y decide si contiene una afirmación médica concreta y contrastable. Campañas, anuncios administrativos, infraestructura, acceso a servicios y relatos sin una afirmación verificable se excluyen de la etapa de etiquetado.

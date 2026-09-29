@@ -6,7 +6,7 @@ Este repositorio contiene únicamente el recolector utilizado por el notebook de
 
 1. El Colab lee los `record_id` existentes en la pestaña `Raw` de Google Sheets.
 2. Ejecuta `scripts/01_collect_newsdata_urls.py` y le pasa esos identificadores para evitar repeticiones.
-3. El recolector carga `configs/batch_12.yaml`, consulta secciones públicas de salud y guarda un CSV temporal de candidatas.
+3. El recolector carga `configs/batch.yaml`, consulta secciones públicas de salud y guarda un CSV temporal de candidatas.
 4. El Colab vuelve a comprobar los identificadores y anexa a `Raw` únicamente las noticias nuevas.
 5. El investigador revisa manualmente relevancia médica y elegibilidad de la afirmación.
 6. El Colab descarga el cuerpo de las filas aprobadas y las agrega a `Extraccion` para la posterior validación con evidencia.
@@ -42,11 +42,21 @@ La configuración vigente no consume créditos de NewsData. La integración se c
 
 Una corrida puede devolver menos de 12 candidatas nuevas si las páginas no contienen suficientes artículos que superen los filtros o si las URLs ya existen en `Raw`. El reporte registra el resultado real; nunca se inventan URLs ni se reutilizan noticias existentes para completar el cupo.
 
+### Frecuencia recomendada
+
+- Ejecutar una corrida de 12 candidatas como máximo una vez cada 24 horas.
+- Si la corrida devuelve pocas noticias nuevas, esperar 48 horas antes de repetirla.
+- `request_delay_seconds: 1.0` solo separa solicitudes consecutivas dentro de
+  una corrida; no obliga a esperar una hora o un día entre ejecuciones.
+- Repetir el Colab inmediatamente suele devolver las mismas portadas y no
+  acelera la construcción del corpus. Para recuperar noticias históricas se
+  debe implementar paginación o rangos de fecha, no aumentar la frecuencia.
+
 ## Archivos del repositorio
 
 ```text
 configs/
-  batch_12.yaml                  fuentes, temas y límites de la corrida
+  batch.yaml                     fuentes, temas y límites de la corrida
 scripts/
   01_collect_newsdata_urls.py    punto de entrada ejecutado por Colab
 src/peruvian_medical_misinformation/
@@ -54,7 +64,7 @@ src/peruvian_medical_misinformation/
   newsdata.py                    recolección, normalización y deduplicación
 tests/
   test_newsdata_batch.py         pruebas del recolector
-  test_batch_12_contract.py      protege las fuentes y la meta global del batch
+  test_batch_contract.py         protege las fuentes y la meta global del batch
   test_repository_hygiene.py     evita versionar datos CSV
 docs/
   data_schema.md                 columnas de Raw y Extraccion

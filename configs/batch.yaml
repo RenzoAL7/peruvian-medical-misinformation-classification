@@ -3,7 +3,7 @@
 # Estas páginas públicas están permitidas por robots.txt y no consumen créditos
 # de NewsData. El endpoint permanece configurado para pruebas futuras.
 batch:
-  name: seminario_1_textual_health_12
+  name: seminario_1_textual_health
   endpoint: https://newsdata.io/api/1/latest
   output_dir: data/01_candidates
   report_dir: reports/runs
@@ -13,6 +13,8 @@ batch:
   language: es
   country: pe
   category: health
+  # Pausa entre solicitudes consecutivas dentro de una misma corrida. No es
+  # el tiempo que debe transcurrir entre dos ejecuciones del Colab.
   request_delay_seconds: 1.0
   timeout_seconds: 30
   # Si se vuelve a habilitar una fuente NewsData, estos límites protegen el

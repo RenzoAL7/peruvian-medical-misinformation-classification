@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
-        default="configs/batch_12.yaml",
+        default="configs/batch.yaml",
         help="Configuración YAML relativa al repositorio.",
     )
     parser.add_argument(

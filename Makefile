@@ -1,5 +1,5 @@
 PYTHON ?= .venv/bin/python
-CONFIG ?= configs/batch_12.yaml
+CONFIG ?= configs/batch.yaml
 RUN_ID ?=
 EXISTING ?=
 

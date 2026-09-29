@@ -6,8 +6,8 @@ from peruvian_medical_misinformation.newsdata import load_yaml, validate_batch_c
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_batch_12_uses_diverse_verified_textual_health_sources() -> None:
-    config = load_yaml(REPOSITORY_ROOT / "configs" / "batch_12.yaml")
+def test_batch_uses_diverse_verified_textual_health_sources() -> None:
+    config = load_yaml(REPOSITORY_ROOT / "configs" / "batch.yaml")
     batch, sources = validate_batch_config(config)
 
     assert batch["per_source_limit"] == 2
