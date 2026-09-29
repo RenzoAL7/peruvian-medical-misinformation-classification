@@ -241,6 +241,91 @@ def discovery_text(value: str) -> str:
     )
 
 
+def contains_term(text: str, term: str) -> bool:
+    """Busca una palabra o frase completa en texto ya normalizado.
+
+    Este criterio se usa solo para exclusiones editoriales. Evita falsos
+    positivos como ``actor`` dentro de ``factor`` o ``factores``.
+    """
+
+    pattern = rf"(?<!\w){re.escape(term)}(?!\w)"
+    return re.search(pattern, text) is not None
+
+
+def candidate_rejection_reason(
+    *,
+    url: str,
+    title: str,
+    description: str = "",
+    source: Mapping[str, Any],
+    batch: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Aplica filtros editoriales conservadores antes de guardar una candidata.
+
+    Los filtros solo reducen ruido de descubrimiento. No asignan relevancia
+    médica definitiva ni una etiqueta de veracidad.
+    """
+
+    batch = batch or {}
+    path = urlsplit(url).path
+    allowed_prefixes = [
+        str(prefix).strip()
+        for prefix in source.get("article_url_prefixes", [])
+        if str(prefix).strip()
+    ]
+    if allowed_prefixes and not any(
+        path.startswith(prefix) and path.rstrip("/") != prefix.rstrip("/")
+        for prefix in allowed_prefixes
+    ):
+        return "outside_allowed_section"
+
+    excluded_prefixes = [
+        str(prefix).strip()
+        for prefix in (
+            list(batch.get("excluded_article_url_prefixes", []))
+            + list(source.get("excluded_article_url_prefixes", []))
+        )
+        if str(prefix).strip()
+    ]
+    if any(path.startswith(prefix) for prefix in excluded_prefixes):
+        return "excluded_section"
+
+    searchable = discovery_text(f"{title} {description}")
+    medical_keywords = [
+        discovery_text(str(keyword))
+        for keyword in (
+            list(batch.get("candidate_keywords", []))
+            + list(source.get("candidate_keywords", []))
+        )
+        if str(keyword).strip()
+    ]
+    if medical_keywords and not any(keyword in searchable for keyword in medical_keywords):
+        return "no_medical_term"
+
+    claim_keywords = [
+        discovery_text(str(keyword))
+        for keyword in (
+            list(batch.get("candidate_claim_keywords", []))
+            + list(source.get("candidate_claim_keywords", []))
+        )
+        if str(keyword).strip()
+    ]
+    if claim_keywords and not any(keyword in searchable for keyword in claim_keywords):
+        return "no_claim_cue"
+
+    excluded_keywords = [
+        discovery_text(str(keyword))
+        for keyword in (
+            list(batch.get("excluded_candidate_keywords", []))
+            + list(source.get("excluded_candidate_keywords", []))
+        )
+        if str(keyword).strip()
+    ]
+    if any(contains_term(searchable, keyword) for keyword in excluded_keywords):
+        return "excluded_topic"
+    return None
+
+
 def normalize_archive_article(
     *,
     raw_url: str,
@@ -250,6 +335,7 @@ def normalize_archive_article(
     run_id: str,
     archive_url: str,
     retrieved_at: str,
+    batch: Mapping[str, Any] | None = None,
 ) -> dict[str, str] | None:
     """Convierte un enlace de archivo público en una candidata trazable."""
 
@@ -263,7 +349,10 @@ def normalize_archive_article(
     is_article_url = (
         True
         if source.get("allow_selected_article_urls", False)
-        else any(path.startswith(prefix) for prefix in prefixes)
+        else any(
+            path.startswith(prefix) and path.rstrip("/") != prefix.rstrip("/")
+            for prefix in prefixes
+        )
         if prefixes
         else bool(ARTICLE_URL_PATTERN.search(path))
     )
@@ -272,8 +361,12 @@ def normalize_archive_article(
     clean_title = title.strip()
     if not clean_title:
         return None
-    keywords = [discovery_text(str(keyword)) for keyword in source.get("candidate_keywords", []) if str(keyword).strip()]
-    if keywords and not any(keyword in discovery_text(f"{clean_title} {normalized_url}") for keyword in keywords):
+    if candidate_rejection_reason(
+        url=normalized_url,
+        title=clean_title,
+        source=source,
+        batch=batch,
+    ):
         return None
     return {
         "run_id": run_id,
@@ -306,6 +399,7 @@ def archive_candidates_from_html(
     source: Mapping[str, Any],
     run_id: str,
     retrieved_at: str,
+    batch: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Extrae enlaces de artículos, no menús ni rutas de archivo, de una página pública."""
 
@@ -327,6 +421,7 @@ def archive_candidates_from_html(
             run_id=run_id,
             archive_url=archive_url,
             retrieved_at=retrieved_at,
+            batch=batch,
         )
         if row is not None:
             existing = candidates.get(row["canonical_url"])
@@ -360,9 +455,11 @@ def validate_batch_config(config: Mapping[str, Any]) -> tuple[Mapping[str, Any],
         raise NewsDataConfigurationError("No hay fuentes configuradas")
     expected = int(batch["expected_total"])
     per_source = int(batch["per_source_limit"])
-    if expected != per_source * len(valid_sources):
+    if expected < 1 or per_source < 1:
+        raise NewsDataConfigurationError("expected_total y per_source_limit deben ser mayores que cero")
+    if expected > per_source * len(valid_sources):
         raise NewsDataConfigurationError(
-            "expected_total debe ser per_source_limit multiplicado por el número de fuentes"
+            "expected_total no puede superar la capacidad conjunta de las fuentes"
         )
     return batch, valid_sources
 
@@ -505,6 +602,7 @@ def collect_candidates(
                 source=source,
                 run_id=run_id,
                 retrieved_at=retrieved_at,
+                batch=batch,
             ):
                 if row["record_id"] in excluded_ids:
                     state["duplicate_ids"].add(row["record_id"])
@@ -518,15 +616,24 @@ def collect_candidates(
 
     # Las consultas se reparten por rondas: cada medio pendiente prueba el tema
     # actual antes de que un solo medio consuma todo el presupuesto.
-    api_source_ids = [
-        source_id
-        for source_id, source in sources.items()
-        if len(selected_by_source[source_id]) < limit
-        and (
-            str(source.get("discovery", "newsdata")) == "newsdata"
-            or bool(source.get("newsdata_fallback", False))
-        )
-    ]
+    expected_total = int(batch["expected_total"])
+
+    def discovered_total() -> int:
+        return sum(min(limit, len(rows)) for rows in selected_by_source.values())
+
+    api_source_ids = (
+        [
+            source_id
+            for source_id, source in sources.items()
+            if len(selected_by_source[source_id]) < limit
+            and (
+                str(source.get("discovery", "newsdata")) == "newsdata"
+                or bool(source.get("newsdata_fallback", False))
+            )
+        ]
+        if discovered_total() < expected_total
+        else []
+    )
     stop_api_requests = False
     for query in queries:
         for source_id in api_source_ids:
@@ -548,6 +655,7 @@ def collect_candidates(
                 "q": query,
                 "size": str(results_per_request),
                 "removeduplicate": "1",
+                "video": "0",
             }
             state["api_requests"] += 1
             state["queries_attempted"].append(query)
@@ -577,6 +685,14 @@ def collect_candidates(
                 )
                 if row is None:
                     continue
+                if candidate_rejection_reason(
+                    url=row["canonical_url"],
+                    title=row["title"],
+                    description=row["description"],
+                    source=source,
+                    batch=batch,
+                ):
+                    continue
                 if row["record_id"] in excluded_ids:
                     state["duplicate_ids"].add(row["record_id"])
                     duplicates_skipped_ids.add(row["record_id"])
@@ -584,17 +700,47 @@ def collect_candidates(
                 selected.setdefault(row["canonical_url"], row)
                 if len(selected) >= limit:
                     break
+            if discovered_total() >= expected_total:
+                stop_api_requests = True
+                break
             if delay and len(selected) < limit:
                 sleep(delay)
         if stop_api_requests:
             break
 
+    # La meta es global, no una obligación rígida por medio. Se rota el primer
+    # medio según la cantidad de registros ya existentes y se selecciona una
+    # candidata por fuente en cada ronda. Esto evita que un solo portal domine
+    # el lote cuando hay más fuentes que cupos.
+    source_ids = list(sources)
+    source_offset = len(excluded_ids) % len(source_ids)
+    source_order = source_ids[source_offset:] + source_ids[:source_offset]
+    discovered_by_source = {
+        source_id: list(selected_by_source[source_id].values())[:limit]
+        for source_id in source_ids
+    }
     candidates: list[dict[str, str]] = []
+    selected_counts = {source_id: 0 for source_id in source_ids}
+    for position in range(limit):
+        for source_id in source_order:
+            available = discovered_by_source[source_id]
+            if position >= len(available):
+                continue
+            candidates.append(available[position])
+            selected_counts[source_id] += 1
+            if len(candidates) >= expected_total:
+                break
+        if len(candidates) >= expected_total:
+            break
+
     per_source: dict[str, dict[str, Any]] = {}
     for source_id, source in sources.items():
-        selected_rows = list(selected_by_source[source_id].values())[:limit]
+        discovered_rows = discovered_by_source[source_id]
+        selected_count = selected_counts[source_id]
         state = source_state[source_id]
-        if len(selected_rows) < limit and state["status"] == "completed":
+        if selected_count < len(discovered_rows) and len(candidates) >= expected_total:
+            state["status"] = "batch_target_reached"
+        elif len(discovered_rows) < limit and state["status"] == "completed":
             if rate_limited:
                 state["status"] = (
                     "incomplete_after_rate_limit"
@@ -611,11 +757,11 @@ def collect_candidates(
                 state["status"] = "max_requests_exhausted"
             else:
                 state["status"] = "partial_no_results"
-        candidates.extend(selected_rows)
         per_source[source_id] = {
             "requested": limit,
-            "collected": len(selected_rows),
-            "shortfall": max(0, limit - len(selected_rows)),
+            "eligible_discovered": len(discovered_rows),
+            "collected": selected_count,
+            "shortfall": max(0, limit - len(discovered_rows)),
             "requests_made": state["archive_requests"] + state["api_requests"],
             "archive_requests": state["archive_requests"],
             "api_requests": state["api_requests"],
@@ -628,12 +774,14 @@ def collect_candidates(
     candidates.sort(key=lambda row: (row["source_id"], row["published_at"], row["canonical_url"]))
     summary: dict[str, Any] = {
         "run_id": run_id,
-        "expected_total": int(batch["expected_total"]),
+        "expected_total": expected_total,
         "collected_total": len(candidates),
         "shortfall_total": max(0, int(batch["expected_total"]) - len(candidates)),
         "per_source": per_source,
         "query_order": queries,
         "query_offset": normalized_offset,
+        "source_order": source_order,
+        "source_offset": source_offset,
         "errors": errors,
         "seeded_total": sum(len(rows) for rows in seeded_by_source.values()),
         "excluded_record_ids_total": len(excluded_ids),
@@ -679,9 +827,16 @@ def read_record_ids(path: str | Path) -> set[str]:
 
         workbook = load_workbook(source, read_only=True, data_only=True)
         worksheets = list(workbook.worksheets)
-        if "Raw" in workbook.sheetnames:
-            raw_sheet = workbook["Raw"]
-            worksheets = [raw_sheet, *(sheet for sheet in worksheets if sheet.title != "Raw")]
+        preferred_sheet = next(
+            (name for name in ("Bronze", "Raw") if name in workbook.sheetnames),
+            None,
+        )
+        if preferred_sheet:
+            bronze_sheet = workbook[preferred_sheet]
+            worksheets = [
+                bronze_sheet,
+                *(sheet for sheet in worksheets if sheet.title != preferred_sheet),
+            ]
         try:
             for worksheet in worksheets:
                 rows = worksheet.iter_rows(values_only=True)

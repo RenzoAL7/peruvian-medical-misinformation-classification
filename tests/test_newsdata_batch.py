@@ -6,6 +6,7 @@ from peruvian_medical_misinformation.newsdata import (
     NewsDataRateLimitError,
     archive_candidates_from_html,
     append_run_registry,
+    candidate_rejection_reason,
     canonicalize_url,
     collect_candidates,
     next_run_number,
@@ -14,6 +15,34 @@ from peruvian_medical_misinformation.newsdata import (
     record_id,
     run_status,
 )
+
+
+def test_excluded_topic_matches_words_not_substrings() -> None:
+    batch = {
+        "candidate_keywords": ["cáncer"],
+        "candidate_claim_keywords": ["riesgo"],
+        "excluded_candidate_keywords": ["actor"],
+    }
+    source = {"article_url_prefixes": ["/salud/"]}
+
+    assert (
+        candidate_rejection_reason(
+            url="https://example.test/salud/factores-cancer/",
+            title="Factores que aumentan el riesgo de cáncer",
+            source=source,
+            batch=batch,
+        )
+        is None
+    )
+    assert (
+        candidate_rejection_reason(
+            url="https://example.test/salud/actor-cancer/",
+            title="Actor comenta un riesgo de cáncer",
+            source=source,
+            batch=batch,
+        )
+        == "excluded_topic"
+    )
 
 
 def test_archive_candidates_keep_article_links_and_ignore_navigation() -> None:
@@ -169,6 +198,59 @@ def test_collect_candidates_caps_sources_and_filters_domains() -> None:
     assert summary["total_requests"] == 2
 
 
+def test_collect_candidates_uses_global_target_with_round_robin_diversity() -> None:
+    config = {
+        "batch": {
+            "endpoint": "https://example.test/latest",
+            "output_dir": "data/01_candidates",
+            "report_dir": "reports/runs",
+            "expected_total": 3,
+            "per_source_limit": 2,
+            "health_queries": ["salud"],
+        },
+        "sources": {
+            "uno": {
+                "name": "Uno",
+                "source_dataset": "archive_uno",
+                "domain": "uno.test",
+                "discovery": "archive",
+                "archive_urls": ["https://uno.test/salud/"],
+                "article_url_prefixes": ["/salud/"],
+            },
+            "dos": {
+                "name": "Dos",
+                "source_dataset": "archive_dos",
+                "domain": "dos.test",
+                "discovery": "archive",
+                "archive_urls": ["https://dos.test/salud/"],
+                "article_url_prefixes": ["/salud/"],
+            },
+        },
+    }
+
+    def html_for(url: str) -> str:
+        domain = "uno.test" if "uno.test" in url else "dos.test"
+        return f"""
+        <a href="https://{domain}/salud/primera/">Primera noticia de salud</a>
+        <a href="https://{domain}/salud/segunda/">Segunda noticia de salud</a>
+        """
+
+    rows, summary = collect_candidates(
+        config,
+        api_key="",
+        run_id="test_run",
+        request_json=lambda *_: (_ for _ in ()).throw(AssertionError("No debe llamar a la API")),
+        request_html=html_for,
+        sleep=lambda _: None,
+    )
+
+    assert len(rows) == 3
+    assert summary["collected_total"] == 3
+    assert summary["per_source"]["uno"]["eligible_discovered"] == 2
+    assert summary["per_source"]["dos"]["eligible_discovered"] == 2
+    assert {row["source_id"] for row in rows} == {"uno", "dos"}
+
+
 def test_collect_candidates_skips_sheet_duplicates_and_tries_next_query() -> None:
     config = {
         "batch": {
@@ -216,9 +298,42 @@ def test_collect_candidates_skips_sheet_duplicates_and_tries_next_query() -> Non
     assert [call["q"] for call in calls] == ["medicina", "salud"]
     assert all(call["size"] == "10" for call in calls)
     assert all(call["removeduplicate"] == "1" for call in calls)
+    assert all(call["video"] == "0" for call in calls)
     assert {row["title"] for row in rows} == {"Nueva uno", "Nueva dos"}
     assert summary["duplicates_skipped_total"] == 1
     assert summary["per_source"]["rpp"]["duplicates_skipped"] == 1
+
+
+def test_archive_filters_section_root_and_non_medical_titles() -> None:
+    batch = {
+        "candidate_keywords": ["cáncer", "vacuna"],
+        "candidate_claim_keywords": ["riesgo", "previene"],
+    }
+    source = {
+        "name": "Diario Correo",
+        "source_dataset": "archive_correo_salud",
+        "domain": "diariocorreo.pe",
+        "article_url_prefixes": ["/salud/"],
+        "article_link_selector": "a[href*='/salud/']",
+    }
+    html = """
+    <a href="/salud/">Portada de salud</a>
+    <a href="/salud/cancer-senales-noticia/">Cáncer: señales que aumentan el riesgo</a>
+    <a href="/salud/concurso-alimentacion-noticia/">Concurso de alimentación en Lima</a>
+    <a href="/politica/vacuna-noticia/">Vacuna debatida en el Congreso</a>
+    """
+
+    rows = archive_candidates_from_html(
+        html,
+        archive_url="https://diariocorreo.pe/salud/",
+        source_id="correo",
+        source=source,
+        run_id="test_run",
+        retrieved_at="2026-09-29T00:00:00+00:00",
+        batch=batch,
+    )
+
+    assert [row["title"] for row in rows] == ["Cáncer: señales que aumentan el riesgo"]
 
 
 def test_archive_fallback_does_not_duplicate_partial_archive_result() -> None:
@@ -275,13 +390,13 @@ def test_read_record_ids_from_sheet_export(tmp_path) -> None:
     assert read_record_ids(exported) == {"abc", "def"}
 
 
-def test_read_record_ids_from_excel_raw_sheet(tmp_path) -> None:
+def test_read_record_ids_from_excel_bronze_sheet(tmp_path) -> None:
     from openpyxl import Workbook
 
     exported = tmp_path / "revision.xlsx"
     workbook = Workbook()
     worksheet = workbook.active
-    worksheet.title = "Raw"
+    worksheet.title = "Bronze"
     worksheet.append(["run_id", "record_id", "title"])
     worksheet.append(["run_1", "abc", "Uno"])
     worksheet.append(["run_2", "abc", "Duplicada"])
@@ -289,6 +404,20 @@ def test_read_record_ids_from_excel_raw_sheet(tmp_path) -> None:
     workbook.save(exported)
 
     assert read_record_ids(exported) == {"abc", "def"}
+
+
+def test_read_record_ids_from_legacy_raw_sheet(tmp_path) -> None:
+    from openpyxl import Workbook
+
+    exported = tmp_path / "revision_legacy.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Raw"
+    worksheet.append(["run_id", "record_id", "title"])
+    worksheet.append(["run_1", "abc", "Uno"])
+    workbook.save(exported)
+
+    assert read_record_ids(exported) == {"abc"}
 
 
 def test_collect_candidates_stops_after_rate_limit() -> None:

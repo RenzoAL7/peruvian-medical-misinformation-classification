@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
-        default="configs/batch_12.yaml",
+        default="configs/batch.yaml",
         help="Configuración YAML relativa al repositorio.",
     )
     parser.add_argument(
@@ -97,8 +97,8 @@ def main() -> int:
         print(f"Siguiente corrida registrada: #{run_number}")
         print(
             "Configuración válida: "
-            f"{batch['expected_total']} candidatas = "
-            f"{batch['per_source_limit']} por cada una de {len(sources)} fuentes."
+            f"meta global de {batch['expected_total']} candidatas; "
+            f"máximo {batch['per_source_limit']} por cada una de {len(sources)} fuentes."
         )
         if seeded_rows:
             print(f"La reanudación conservaría {len(seeded_rows)} candidatas previas.")
@@ -107,8 +107,15 @@ def main() -> int:
         print("No se hicieron solicitudes a NewsData.io.")
         return 0
 
-    load_local_env(project_path(args.env_file))
-    api_key = api_key_from_environment()
+    uses_newsdata = any(
+        str(source.get("discovery", "newsdata")) == "newsdata"
+        or bool(source.get("newsdata_fallback", False))
+        for source in sources.values()
+    )
+    api_key = ""
+    if uses_newsdata:
+        load_local_env(project_path(args.env_file))
+        api_key = api_key_from_environment()
     run_id = args.run_id or f"run_{run_number:03d}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     configured_queries = [query for query in batch["health_queries"] if str(query).strip()]
     priority_query_count = int(batch.get("priority_query_count", 0))
@@ -165,7 +172,10 @@ def main() -> int:
 
     print(f"Corrida #{run_number}: {run_id}")
     print(f"Candidatas guardadas: {len(rows)}/{batch['expected_total']} en {candidates_path}")
-    print("Orden de temas médicos: " + ", ".join(summary["query_order"]))
+    if summary["total_requests"]:
+        print("Orden de consultas API: " + ", ".join(summary["query_order"]))
+    else:
+        print("NewsData no se consultó; esta corrida usó únicamente archivos públicos.")
     if summary["seeded_total"]:
         print(f"Candidatas conservadas desde una corrida previa: {summary['seeded_total']}")
     if summary["duplicates_skipped_total"]:
@@ -176,7 +186,8 @@ def main() -> int:
     for source_id, counts in summary["per_source"].items():
         topics = ", ".join(counts["queries_attempted"]) or "sin consultas API"
         print(
-            f"- {source_id}: {counts['collected']}/{counts['requested']} "
+            f"- {source_id}: {counts['collected']} seleccionadas de "
+            f"{counts['eligible_discovered']} elegibles (máximo {counts['requested']}) "
             f"[{counts['status']}]; temas: {topics}"
         )
     if summary["shortfall_total"]:
