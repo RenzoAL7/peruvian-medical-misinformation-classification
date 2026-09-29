@@ -12,19 +12,19 @@ La frecuencia operativa recomendada es una corrida cada 24 horas. Si no hay sufi
 
 ## 2. Revisión humana en Bronze
 
-Las candidatas ingresan con estado `PENDIENTE`. El investigador determina si la noticia es médica, registra la razón y decide si contiene una afirmación médica concreta y contrastable. Campañas, anuncios administrativos, infraestructura, acceso a servicios y relatos sin una afirmación verificable se excluyen de la etapa de etiquetado.
+Las candidatas ingresan con `selection_status=PENDIENTE`. El investigador toma una sola decisión: `INCLUIR` si la noticia es médica, tiene texto periodístico y contiene una afirmación concreta y contrastable; en caso contrario elige `EXCLUIR_NO_MEDICA`, `EXCLUIR_SIN_AFIRMACION` o `EXCLUIR_SIN_TEXTO`. Así se evita completar cuatro columnas distintas para expresar una misma decisión operativa.
 
 ## 3. Extracción del cuerpo
 
-El Colab selecciona todas las filas con `is_medical=SI`, `is_claim_eligible=SI` y `review_status=COMPLETADA` que todavía no aparecen en `Silver`. Descarga la página con HTTPX, intenta extraer el texto con Trafilatura y usa BeautifulSoup como respaldo. El estado de extracción y el método quedan registrados.
+El Colab selecciona todas las filas con `selection_status=INCLUIR` que todavía no aparecen en `Silver`. Descarga la página con HTTPX, intenta extraer el texto con Trafilatura y usa BeautifulSoup como respaldo. Solo agrega cuerpos de al menos 150 palabras y 800 caracteres; cuando no lo consigue actualiza Bronze a `EXCLUIR_SIN_TEXTO`.
 
 ## 4. Validación con evidencia
 
-En `Silver`, el investigador delimita la afirmación principal y la contrasta con fuentes especializadas como MINSA, INS, EsSalud, OMS/OPS, PubMed u otra autoridad pertinente. Registra evidencia, justificación, etiqueta, revisor y estado de validación. Ni NewsData ni el medio periodístico determinan la etiqueta. Cuando la candidata proviene de MINSA, la evidencia confirmatoria debe registrarse con una fuente independiente y no asumirse a partir del dominio.
+En `Silver`, el investigador delimita la afirmación principal y la contrasta con fuentes especializadas como MINSA, INS, EsSalud, OMS/OPS, PubMed u otra autoridad pertinente. Registra una URL de evidencia, una nota breve de verificación, la etiqueta, el revisor y el estado de validación. Ni NewsData ni el medio periodístico determinan la etiqueta. Cuando la candidata proviene de MINSA, la evidencia confirmatoria debe registrarse con una fuente independiente y no asumirse a partir del dominio.
 
 ## 5. Construcción de Gold
 
-El Colab reconstruye `Gold` a partir de `Silver`. Solo copia registros con cuerpo extraído correctamente, evidencia completa, etiqueta binaria válida, validación completada y aprobación final para entrenamiento. Deduplica por `record_id` y deja `dataset_split` vacío hasta aplicar la partición estratificada 70/15/15.
+El Colab reconstruye `Gold` a partir de `Silver`. Solo copia registros con cuerpo, afirmación médica, URL de evidencia, etiqueta binaria válida y validación completada. Deduplica por `record_id` y deja `dataset_split` vacío hasta aplicar la partición estratificada 70/15/15. Los modelos usarán `title + body` como entrada y `label` como objetivo; fuente y tema se reservan para auditoría.
 
 ## 6. Alcance actual
 
