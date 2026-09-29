@@ -33,7 +33,7 @@ Solo recibe filas de `Raw` con `is_medical=SI`, `is_claim_eligible=SI` y `review
 | `body` | Texto principal descargado desde la URL pública. |
 | `http_status` | Código HTTP obtenido. |
 | `extraction_method` | `trafilatura`, respaldo con BeautifulSoup o ausencia de extracción. |
-| `extraction_status` | `OK`, `CUERPO_CORTO` o error de descarga. |
+| `extraction_status` | `OK`, `CUERPO_INSUFICIENTE` o error de descarga. |
 | `extracted_at` | Fecha UTC de extracción. |
 | `main_medical_claim` | Afirmación médica principal delimitada manualmente. |
 | `evidence_source`, `evidence_url`, `evidence_excerpt` | Evidencia usada para contrastar la afirmación. |
@@ -42,6 +42,7 @@ Solo recibe filas de `Raw` con `is_medical=SI`, `is_claim_eligible=SI` y `review
 | `reviewer`, `validation_status`, `validated_at` | Responsable y trazabilidad de validación. |
 
 La extracción del cuerpo no asigna una etiqueta. Las decisiones médicas y de veracidad siguen siendo humanas y basadas en evidencia.
+Un cuerpo necesita al menos 150 palabras y 800 caracteres para quedar con `extraction_status=OK`; de lo contrario, el Colab fija `final_training_eligible=NO` por insuficiencia técnica.
 
 ## Artefactos temporales
 

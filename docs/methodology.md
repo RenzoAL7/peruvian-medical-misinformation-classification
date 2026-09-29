@@ -2,11 +2,11 @@
 
 ## 1. Descubrimiento de candidatas
 
-El Colab obtiene los `record_id` ya registrados en `Raw` y ejecuta el recolector del repositorio. La configuración solicita hasta dos candidatas de cada uno de seis medios peruanos: El Comercio, RPP Noticias, Latina Noticias, El Peruano, Perú21 y La República.
+El Colab obtiene los `record_id` ya registrados en `Raw` y ejecuta el recolector del repositorio. La configuración solicita hasta tres candidatas de cada una de cuatro secciones textuales de salud: El Comercio, La República, Diario Correo y Diario Ojo.
 
-Latina y Perú21 se procesan primero mediante sus archivos públicos. Los demás medios usan el endpoint `latest` de NewsData con idioma español, país Perú y categoría `health`. Para aprovechar cada crédito, dos consultas prioritarias agrupan con `OR` los diez términos médicos. Si todavía faltan candidatas, se prueban términos individuales, cuyo orden rota según la cantidad de identificadores ya registrados. Las consultas se reparten por rondas entre los medios pendientes y se detienen con un límite interno de 30 solicitudes.
+Las cuatro fuentes se descubren desde páginas públicas permitidas por `robots.txt`, por lo que la corrida vigente no consume créditos de NewsData. Antes de conservar una URL se valida que pertenezca a la sección autorizada y que el título o bajada incluya un término médico y una señal de afirmación contrastable. La integración opcional con NewsData permanece limitada a cuatro solicitudes por corrida y excluye resultados de video.
 
-Cada URL se normaliza y se transforma en un `record_id`. Las coincidencias con `Raw` se descartan durante la búsqueda. Antes de anexar, el Colab vuelve a leer la hoja y aplica una segunda deduplicación.
+Cada URL se normaliza y se transforma en un `record_id`. Las coincidencias con `Raw` se descartan durante la búsqueda. Antes de anexar, el Colab vuelve a leer la hoja y aplica una segunda deduplicación. Latina, El Peruano, Perú21 y RPP no se incluyen en la configuración vigente: las pruebas reales mostraron ruido temático, ausencia de resultados, restricciones de automatización o cuerpos demasiado breves.
 
 ## 2. Revisión humana en Raw
 

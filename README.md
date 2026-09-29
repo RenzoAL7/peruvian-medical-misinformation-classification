@@ -6,29 +6,27 @@ Este repositorio contiene únicamente el recolector utilizado por el notebook de
 
 1. El Colab lee los `record_id` existentes en la pestaña `Raw` de Google Sheets.
 2. Ejecuta `scripts/01_collect_newsdata_urls.py` y le pasa esos identificadores para evitar repeticiones.
-3. El recolector carga `configs/batch_12.yaml`, consulta archivos públicos y NewsData, y guarda un CSV temporal de candidatas.
+3. El recolector carga `configs/batch_12.yaml`, consulta secciones públicas de salud y guarda un CSV temporal de candidatas.
 4. El Colab vuelve a comprobar los identificadores y anexa a `Raw` únicamente las noticias nuevas.
 5. El investigador revisa manualmente relevancia médica y elegibilidad de la afirmación.
 6. El Colab descarga el cuerpo de las filas aprobadas y las agrega a `Extraccion` para la posterior validación con evidencia.
 
 ## Medios y método de descubrimiento
 
-Cada corrida intenta obtener hasta 12 candidatas: 2 por cada medio.
+Cada corrida intenta obtener hasta 12 candidatas textuales: 3 por cada medio.
 
-| Medio | Método principal | Respaldo |
-| --- | --- | --- |
-| El Comercio | NewsData | — |
-| RPP Noticias | NewsData | — |
-| Latina Noticias | Archivo público de Salud/Medicina | NewsData |
-| El Peruano | NewsData | — |
-| Perú21 | Archivo público de Salud | NewsData |
-| La República | NewsData | — |
+| Medio | Sección pública verificada |
+| --- | --- |
+| El Comercio | `bienestar/salud-fisica` |
+| La República | `salud` |
+| Diario Correo | `salud` |
+| Diario Ojo | `salud` |
 
-Los archivos públicos de Latina y Perú21 se procesan antes de consumir créditos de NewsData. Las consultas API se reparten por rondas entre los medios pendientes. Primero se ejecutan dos consultas agrupadas con `OR` que cubren los diez temas médicos en solo dos créditos por medio; si faltan candidatas, los temas individuales rotan entre corridas. NewsData también recibe `removeduplicate=1` y el repositorio vuelve a deduplicar por URL canónica y `record_id`.
+Las cuatro secciones fueron comprobadas con `robots.txt` y con extracción real de cuerpos. El recolector acepta únicamente URLs internas de esas secciones y exige que el título o bajada contenga un término médico y una señal de afirmación contrastable. Las candidatas se deduplican por URL canónica y `record_id`.
 
-El límite interno es de 30 solicitudes por corrida. Que se alcance ese límite significa que el programa se detuvo de forma controlada; no equivale necesariamente a que NewsData haya agotado los créditos de la cuenta.
+La configuración vigente no consume créditos de NewsData. La integración se conserva para pruebas futuras y, si se vuelve a habilitar, aplica `video=0`, `removeduplicate=1`, máximo 2 solicitudes por fuente y máximo 4 por corrida para proteger el plan gratuito.
 
-El endpoint `latest` puede devolver menos de 12 candidatas nuevas si no existen publicaciones recientes suficientes o si la cuenta alcanza su límite temporal. El reporte registra el resultado real; nunca se inventan URLs ni se reutilizan noticias existentes para completar el cupo.
+Una corrida puede devolver menos de 12 candidatas nuevas si las páginas no contienen suficientes artículos que superen los filtros o si las URLs ya existen en `Raw`. El reporte registra el resultado real; nunca se inventan URLs ni se reutilizan noticias existentes para completar el cupo.
 
 ## Archivos del repositorio
 

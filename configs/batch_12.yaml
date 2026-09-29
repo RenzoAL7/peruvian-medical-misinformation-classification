@@ -1,132 +1,147 @@
-# Batch piloto reproducible: 2 candidatas por cada uno de seis medios.
-# El endpoint `latest` recupera noticias recientes (hasta 48 horas, según NewsData).
+# Batch de 12 candidatas textuales: 3 por cada sección médica verificada.
+# Estas páginas públicas están permitidas por robots.txt y no consumen créditos
+# de NewsData. El endpoint permanece configurado para pruebas futuras.
 batch:
-  name: seminario_1_newsdata_12
+  name: seminario_1_textual_health_12
   endpoint: https://newsdata.io/api/1/latest
   output_dir: data/01_candidates
   report_dir: reports/runs
   run_registry_path: data/00_control/run_registry.csv
   expected_total: 12
-  per_source_limit: 2
+  per_source_limit: 3
   language: es
   country: pe
   category: health
-  # En cuentas gratuitas NewsData limita los créditos por ventana de 15 minutos.
-  # Se reserva margen para no agotar la ventana durante una sola corrida.
-  request_delay_seconds: 2.0
+  request_delay_seconds: 1.0
   timeout_seconds: 30
-  # Las dos primeras consultas agrupan los diez temas para aprovechar mejor
-  # cada credito. Si no bastan, se prueban los temas individuales rotados.
-  max_requests_per_source: 10
-  max_requests_total: 30
+  # Si se vuelve a habilitar una fuente NewsData, estos límites protegen el
+  # plan gratuito. `video=0` y `removeduplicate=1` se envían desde el código.
+  max_requests_per_source: 2
+  max_requests_total: 4
   priority_query_count: 2
-  # Recupera hasta 10 resultados por crédito y conserva solo candidatas nuevas.
-  # Si una respuesta contiene record_id ya presentes en la hoja, continúa con
-  # la siguiente consulta médica de esta lista.
   results_per_request: 10
   health_queries:
-    - (salud OR medicina OR enfermedad OR tratamiento OR medicamento)
-    - (vacuna OR síntomas OR prevención OR cáncer OR diabetes)
-    - salud
-    - medicina
+    - (cáncer OR diabetes OR hipertensión OR anemia OR dengue OR tuberculosis)
+    - (vacuna OR medicamento OR tratamiento OR diagnóstico OR síntomas OR prevención)
+    - (salud mental OR depresión OR obesidad OR nutrición OR infección)
+
+  # Un término médico y una señal de afirmación deben aparecer en el título o
+  # bajada. Es un filtro de ruido; la revisión humana conserva la decisión final.
+  candidate_keywords:
+    - cáncer
+    - tumor
+    - diabetes
+    - hipertensión
+    - anemia
+    - dengue
+    - tuberculosis
+    - sarampión
+    - influenza
+    - virus
+    - infección
     - enfermedad
+    - síndrome
+    - vacuna
+    - medicamento
+    - tratamiento
+    - diagnóstico
+    - síntomas
+    - prevención
+    - obesidad
+    - nutrición
+    - depresión
+    - ansiedad
+    - salud mental
+    - corazón
+    - cardíaco
+    - renal
+    - riñón
+    - hígado
+    - menstruación
+    - adulto mayor
+    - embarazo
+    - lactancia
+  candidate_claim_keywords:
+    - riesgo
+    - síntoma
+    - señal
+    - causa
+    - provoca
+    - afecta
+    - aumenta
+    - reduce
+    - previene
+    - prevenir
     - tratamiento
     - medicamento
     - vacuna
-    - síntomas
-    - prevención
-    - cáncer
-    - diabetes
+    - diagnóstico
+    - recomienda
+    - alerta
+    - evidencia
+    - estudio
+    - mito
+    - beneficio
+    - complicación
+    - enfermedad
+    - cómo
+    - qué es
+    - puede
+    - cuidado
+  excluded_candidate_keywords:
+    - farándula
+    - espectáculo
+    - futbolista
+    - cantante
+    - actor
+    - actriz
+    - congresista
+    - elecciones
+    - horóscopo
 
 sources:
   el_comercio:
     name: El Comercio
-    source_dataset: newsdata_el_comercio
+    source_dataset: archive_el_comercio_salud
     domain: elcomercio.pe
-  rpp:
-    name: RPP Noticias
-    source_dataset: newsdata_rpp
-    domain: rpp.pe
-  latina:
-    name: Latina Noticias
-    # NewsData no cataloga de forma fiable este dominio. Las candidatas se
-    # descubren desde dos archivos públicos permitidos por robots.txt.
-    source_dataset: archive_latina
-    domain: latinanoticias.pe
     discovery: archive
-    newsdata_fallback: true
-    # Alias aceptado por NewsData; solo se usa si el archivo público no entrega 2 URLs.
-    newsdata_domain: latina.pe
-    newsdata_source_dataset: newsdata_latina
     archive_urls:
-      - https://latinanoticias.pe/noticias-sobre/salud/
-      - https://latinanoticias.pe/noticias-sobre/medicina/
-    # Filtro de descubrimiento, no de veracidad ni de pertinencia final.
-    candidate_keywords:
-      - salud
-      - medicina
-      - médico
-      - medicos
-      - enfermedad
-      - tratamiento
-      - medicamento
-      - vacuna
-      - cáncer
-      - cancer
-      - diabetes
-      - hospital
-      - essalud
-      - minsa
-      - oncólogo
-      - oncologo
-      - fisioterapia
-      - órganos
-      - organos
-  el_peruano:
-    name: El Peruano
-    source_dataset: newsdata_el_peruano
-    domain: elperuano.pe
-  peru21:
-    name: Perú21
-    # NewsData puede no tener resultados recientes de Perú21. Se recurre a su
-    # archivo público de Salud y a una segunda página permitida por robots.txt.
-    source_dataset: archive_peru21
-    domain: peru21.pe
-    discovery: archive
-    newsdata_fallback: true
-    newsdata_source_dataset: newsdata_peru21
-    archive_urls:
-      - https://peru21.pe/noticias/salud/
-      - https://peru21.pe/noticias/salud/2/
-    article_link_selector: "div.view-content article.node--type-article a[href]"
-    # El selector ya limita enlaces a tarjetas de artículos; Perú21 publica
-    # noticias de Salud bajo varias secciones (vida, lima, peru, opinión).
-    allow_selected_article_urls: true
-    candidate_keywords:
-      - salud
-      - medicina
-      - médico
-      - medicos
-      - enfermedad
-      - tratamiento
-      - medicamento
-      - vacuna
-      - cáncer
-      - cancer
-      - diabetes
-      - hígado
-      - higado
-      - hospital
-      - essalud
-      - minsa
-      - síntomas
-      - sintomas
-      - prevención
-      - prevencion
-      - virus
-      - migraña
-      - migrana
+      - https://elcomercio.pe/bienestar/salud-fisica/
+    article_link_selector: "a[href*='/bienestar/salud-fisica/']"
+    article_url_prefixes:
+      - /bienestar/salud-fisica/
+
   la_republica:
     name: La República
-    source_dataset: newsdata_la_republica
+    source_dataset: archive_la_republica_salud
     domain: larepublica.pe
+    discovery: archive
+    archive_urls:
+      - https://larepublica.pe/salud/
+      - https://larepublica.pe/tag/salud/
+    article_link_selector: "a[href*='/salud/']"
+    article_url_prefixes:
+      - /salud/
+
+  correo:
+    name: Diario Correo
+    source_dataset: archive_correo_salud
+    domain: diariocorreo.pe
+    discovery: archive
+    archive_urls:
+      - https://diariocorreo.pe/salud/
+      - https://diariocorreo.pe/archivo/salud/
+    article_link_selector: "a[href*='/salud/']"
+    article_url_prefixes:
+      - /salud/
+
+  ojo:
+    name: Diario Ojo
+    source_dataset: archive_ojo_salud
+    domain: ojo.pe
+    discovery: archive
+    archive_urls:
+      - https://ojo.pe/salud/
+    article_link_selector: "a[href*='/salud/']"
+    article_url_prefixes:
+      - /salud/

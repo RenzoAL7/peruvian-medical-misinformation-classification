@@ -241,6 +241,80 @@ def discovery_text(value: str) -> str:
     )
 
 
+def candidate_rejection_reason(
+    *,
+    url: str,
+    title: str,
+    description: str = "",
+    source: Mapping[str, Any],
+    batch: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Aplica filtros editoriales conservadores antes de guardar una candidata.
+
+    Los filtros solo reducen ruido de descubrimiento. No asignan relevancia
+    médica definitiva ni una etiqueta de veracidad.
+    """
+
+    batch = batch or {}
+    path = urlsplit(url).path
+    allowed_prefixes = [
+        str(prefix).strip()
+        for prefix in source.get("article_url_prefixes", [])
+        if str(prefix).strip()
+    ]
+    if allowed_prefixes and not any(
+        path.startswith(prefix) and path.rstrip("/") != prefix.rstrip("/")
+        for prefix in allowed_prefixes
+    ):
+        return "outside_allowed_section"
+
+    excluded_prefixes = [
+        str(prefix).strip()
+        for prefix in (
+            list(batch.get("excluded_article_url_prefixes", []))
+            + list(source.get("excluded_article_url_prefixes", []))
+        )
+        if str(prefix).strip()
+    ]
+    if any(path.startswith(prefix) for prefix in excluded_prefixes):
+        return "excluded_section"
+
+    searchable = discovery_text(f"{title} {description}")
+    medical_keywords = [
+        discovery_text(str(keyword))
+        for keyword in (
+            list(batch.get("candidate_keywords", []))
+            + list(source.get("candidate_keywords", []))
+        )
+        if str(keyword).strip()
+    ]
+    if medical_keywords and not any(keyword in searchable for keyword in medical_keywords):
+        return "no_medical_term"
+
+    claim_keywords = [
+        discovery_text(str(keyword))
+        for keyword in (
+            list(batch.get("candidate_claim_keywords", []))
+            + list(source.get("candidate_claim_keywords", []))
+        )
+        if str(keyword).strip()
+    ]
+    if claim_keywords and not any(keyword in searchable for keyword in claim_keywords):
+        return "no_claim_cue"
+
+    excluded_keywords = [
+        discovery_text(str(keyword))
+        for keyword in (
+            list(batch.get("excluded_candidate_keywords", []))
+            + list(source.get("excluded_candidate_keywords", []))
+        )
+        if str(keyword).strip()
+    ]
+    if any(keyword in searchable for keyword in excluded_keywords):
+        return "excluded_topic"
+    return None
+
+
 def normalize_archive_article(
     *,
     raw_url: str,
@@ -250,6 +324,7 @@ def normalize_archive_article(
     run_id: str,
     archive_url: str,
     retrieved_at: str,
+    batch: Mapping[str, Any] | None = None,
 ) -> dict[str, str] | None:
     """Convierte un enlace de archivo público en una candidata trazable."""
 
@@ -263,7 +338,10 @@ def normalize_archive_article(
     is_article_url = (
         True
         if source.get("allow_selected_article_urls", False)
-        else any(path.startswith(prefix) for prefix in prefixes)
+        else any(
+            path.startswith(prefix) and path.rstrip("/") != prefix.rstrip("/")
+            for prefix in prefixes
+        )
         if prefixes
         else bool(ARTICLE_URL_PATTERN.search(path))
     )
@@ -272,8 +350,12 @@ def normalize_archive_article(
     clean_title = title.strip()
     if not clean_title:
         return None
-    keywords = [discovery_text(str(keyword)) for keyword in source.get("candidate_keywords", []) if str(keyword).strip()]
-    if keywords and not any(keyword in discovery_text(f"{clean_title} {normalized_url}") for keyword in keywords):
+    if candidate_rejection_reason(
+        url=normalized_url,
+        title=clean_title,
+        source=source,
+        batch=batch,
+    ):
         return None
     return {
         "run_id": run_id,
@@ -306,6 +388,7 @@ def archive_candidates_from_html(
     source: Mapping[str, Any],
     run_id: str,
     retrieved_at: str,
+    batch: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Extrae enlaces de artículos, no menús ni rutas de archivo, de una página pública."""
 
@@ -327,6 +410,7 @@ def archive_candidates_from_html(
             run_id=run_id,
             archive_url=archive_url,
             retrieved_at=retrieved_at,
+            batch=batch,
         )
         if row is not None:
             existing = candidates.get(row["canonical_url"])
@@ -505,6 +589,7 @@ def collect_candidates(
                 source=source,
                 run_id=run_id,
                 retrieved_at=retrieved_at,
+                batch=batch,
             ):
                 if row["record_id"] in excluded_ids:
                     state["duplicate_ids"].add(row["record_id"])
@@ -548,6 +633,7 @@ def collect_candidates(
                 "q": query,
                 "size": str(results_per_request),
                 "removeduplicate": "1",
+                "video": "0",
             }
             state["api_requests"] += 1
             state["queries_attempted"].append(query)
@@ -576,6 +662,14 @@ def collect_candidates(
                     retrieved_at=retrieved_at,
                 )
                 if row is None:
+                    continue
+                if candidate_rejection_reason(
+                    url=row["canonical_url"],
+                    title=row["title"],
+                    description=row["description"],
+                    source=source,
+                    batch=batch,
+                ):
                     continue
                 if row["record_id"] in excluded_ids:
                     state["duplicate_ids"].add(row["record_id"])

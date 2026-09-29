@@ -216,9 +216,42 @@ def test_collect_candidates_skips_sheet_duplicates_and_tries_next_query() -> Non
     assert [call["q"] for call in calls] == ["medicina", "salud"]
     assert all(call["size"] == "10" for call in calls)
     assert all(call["removeduplicate"] == "1" for call in calls)
+    assert all(call["video"] == "0" for call in calls)
     assert {row["title"] for row in rows} == {"Nueva uno", "Nueva dos"}
     assert summary["duplicates_skipped_total"] == 1
     assert summary["per_source"]["rpp"]["duplicates_skipped"] == 1
+
+
+def test_archive_filters_section_root_and_non_medical_titles() -> None:
+    batch = {
+        "candidate_keywords": ["cáncer", "vacuna"],
+        "candidate_claim_keywords": ["riesgo", "previene"],
+    }
+    source = {
+        "name": "Diario Correo",
+        "source_dataset": "archive_correo_salud",
+        "domain": "diariocorreo.pe",
+        "article_url_prefixes": ["/salud/"],
+        "article_link_selector": "a[href*='/salud/']",
+    }
+    html = """
+    <a href="/salud/">Portada de salud</a>
+    <a href="/salud/cancer-senales-noticia/">Cáncer: señales que aumentan el riesgo</a>
+    <a href="/salud/concurso-alimentacion-noticia/">Concurso de alimentación en Lima</a>
+    <a href="/politica/vacuna-noticia/">Vacuna debatida en el Congreso</a>
+    """
+
+    rows = archive_candidates_from_html(
+        html,
+        archive_url="https://diariocorreo.pe/salud/",
+        source_id="correo",
+        source=source,
+        run_id="test_run",
+        retrieved_at="2026-09-29T00:00:00+00:00",
+        batch=batch,
+    )
+
+    assert [row["title"] for row in rows] == ["Cáncer: señales que aumentan el riesgo"]
 
 
 def test_archive_fallback_does_not_duplicate_partial_archive_result() -> None:
