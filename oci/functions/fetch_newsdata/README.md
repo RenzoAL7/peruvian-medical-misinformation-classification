@@ -1,10 +1,10 @@
 # `fetch-newsdata`
 
 First OCI Function in the thesis pipeline. It reads the NewsData API key from
-OCI Vault, requests Spanish health news for one country per invocation, and
-writes one CSV per run to the flat `bronze/` prefix in Object Storage. The CSV
-follows the Bronze columns used by the thesis spreadsheet and includes the
-publisher country.
+OCI Vault, requests Spanish health news country by country in a fixed order,
+and writes one deduplicated CSV per run to the flat `bronze/` prefix in Object
+Storage. The CSV follows the Bronze columns used by the thesis spreadsheet and
+includes the publisher country.
 
 ## Required function configuration
 
@@ -20,6 +20,8 @@ NEWSDATA_LANGUAGE=es
 NEWSDATA_CATEGORY=health
 NEWSDATA_SIZE=10
 NEWSDATA_MAX_PAGES=1
+NEWSDATA_TARGET_ROWS=100
+NEWSDATA_COUNTRY_DELAY=2
 NEWSDATA_PAGE_DELAY=4
 NEWSDATA_MAX_RETRIES=2
 NEWSDATA_REMOVEDUPLICATE=1
@@ -28,33 +30,29 @@ NEWSDATA_COUNTRY_SEQUENCE=ar,bo,cl,co,cr,cu,do,ec,es,gt,gq,hn,mx,ni,pa,pe,pr,py,
 ```
 
 `NEWSDATA_QUERY` and `NEWSDATA_ENDPOINT` remain optional filters. The function
-uses `NEWSDATA_COUNTRY_SEQUENCE` as an ordered cycle and selects exactly one
-country per invocation. Puerto Rico (`pr`) is intentionally included as a
-separate territory. After the CSV is written, the cursor is stored as
-`bronze/newsdata_coverage_state.json` with the next country, cycle, and last
-run. A failed invocation does not advance the cursor. Setting
-`NEWSDATA_COUNTRY` temporarily overrides the automatic cursor for a manual
-country run.
+uses `NEWSDATA_COUNTRY_SEQUENCE` as an ordered list and makes one request per
+country in that order during the same invocation. It appends new rows until
+`NEWSDATA_TARGET_ROWS` is reached, then writes one CSV. Puerto Rico (`pr`) is
+intentionally included as a separate territory. The order restarts at `ar` on
+the next invocation; no cursor or state JSON is needed.
 
 With `BRONZE_DEDUP_ENABLED=1`, each run reads prior CSVs under `bronze/` and
-skips any `record_id` already stored there. This prevents the same canonical
-URL from returning in multiple runs while the API's latest feed covers
-overlapping 48-hour windows. `NEWSDATA_MAX_PAGES=1` keeps the country cycle to
-one request per country; increase it only deliberately because each extra
-page is another API request. `NEWSDATA_PAGE_DELAY` spaces requests to respect
-the provider rate limit, while `NEWSDATA_MAX_RETRIES` retries temporary HTTP
-429 responses. The default query searches for common medical terms.
+skips any `record_id` already stored there and also removes duplicates between
+countries in the current run. This prevents the same canonical URL from
+returning in multiple runs while the API's latest feed covers overlapping
+48-hour windows. `NEWSDATA_MAX_PAGES=1` keeps the first pass to one request per
+country; increase it only deliberately because each extra page is another API
+request. `NEWSDATA_COUNTRY_DELAY` spaces country requests, while
+`NEWSDATA_PAGE_DELAY` spaces pages within a country and
+`NEWSDATA_MAX_RETRIES` retries temporary HTTP 429 responses. If fewer than the
+target number of new articles exist in the available country pages, the CSV
+contains the available rows rather than repeating old records. The default
+query searches for common medical terms.
 
 The function writes objects like:
 
 ```text
-bronze/newsdata_run_20261004T000000Z_ab12cd34.csv
-```
-
-Automatic country runs use the country in the object name:
-
-```text
-bronze/newsdata_ar_run_20261004T000000Z_ab12cd34.csv
+bronze/newsdata_batch_run_20261004T000000Z_ab12cd34.csv
 ```
 
 The CSV columns are:

@@ -46,8 +46,8 @@ BRONZE_FIELDS = [
 
 TRACKING_PARAMETERS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 
-# One country is processed per invocation.  Puerto Rico is included as a
-# separate territory so its coverage is visible in the audit trail.
+# Countries are requested in this order within one batch. Puerto Rico is
+# included as a separate territory so its coverage is visible in the audit.
 DEFAULT_COUNTRY_SEQUENCE = (
     "ar",
     "bo",
@@ -130,94 +130,6 @@ def _country_sequence() -> list[str]:
 def _object_storage_client() -> Any:
     signer = oci.auth.signers.get_resource_principals_signer()
     return oci.object_storage.ObjectStorageClient(config={}, signer=signer)
-
-
-def _state_object_name(prefix: str) -> str:
-    return f"{prefix}/newsdata_coverage_state.json" if prefix else "newsdata_coverage_state.json"
-
-
-def _load_coverage_state(
-    client: Any,
-    namespace: str,
-    bucket: str,
-    prefix: str,
-) -> dict[str, Any]:
-    """Load the country cursor; a missing state starts the first cycle."""
-
-    try:
-        object_response = client.get_object(
-            namespace_name=namespace,
-            bucket_name=bucket,
-            object_name=_state_object_name(prefix),
-        )
-    except oci.exceptions.ServiceError as exc:
-        if exc.status == 404:
-            return {}
-        raise
-
-    content = object_response.data.content
-    if hasattr(content, "read"):
-        content = content.read()
-    try:
-        state = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("The country coverage state is not valid JSON") from exc
-    if not isinstance(state, dict):
-        raise RuntimeError("The country coverage state must be a JSON object")
-    return state
-
-
-def _coverage_cursor(
-    client: Any,
-    namespace: str,
-    bucket: str,
-    prefix: str,
-) -> dict[str, Any] | None:
-    """Select the next country unless an explicit country override is set."""
-
-    explicit_country = os.getenv("NEWSDATA_COUNTRY", "").strip().lower()
-    if explicit_country:
-        return None
-
-    sequence = _country_sequence()
-    state = _load_coverage_state(client, namespace, bucket, prefix)
-    stored_sequence = state.get("country_sequence")
-    if stored_sequence != sequence:
-        state = {"country_sequence": sequence, "next_index": 0, "cycle": 1}
-
-    try:
-        next_index = int(state.get("next_index", 0))
-        cycle = int(state.get("cycle", 1))
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("The country coverage cursor is invalid") from exc
-    if not 0 <= next_index < len(sequence):
-        next_index = 0
-    if cycle < 1:
-        cycle = 1
-
-    return {
-        "country_sequence": sequence,
-        "country_index": next_index,
-        "cycle": cycle,
-        "country": sequence[next_index],
-    }
-
-
-def _save_coverage_state(
-    client: Any,
-    namespace: str,
-    bucket: str,
-    prefix: str,
-    state: dict[str, Any],
-) -> None:
-    encoded = json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8")
-    client.put_object(
-        namespace_name=namespace,
-        bucket_name=bucket,
-        object_name=_state_object_name(prefix),
-        put_object_body=io.BytesIO(encoded),
-        content_type="application/json; charset=utf-8",
-    )
 
 
 def _bronze_rows(payload: dict[str, Any], retrieved_at: str) -> list[dict[str, str]]:
@@ -438,20 +350,28 @@ def _request_newsdata(
     return payload, safe_params
 
 
-def _write_bronze(
-    payload: dict[str, Any],
-    request_meta: dict[str, str],
-    requested_country: str,
+def _collect_country_batch(
+    api_key: str,
     client: Any,
-) -> dict[str, str]:
-    namespace = _required_env("OBJECT_STORAGE_NAMESPACE")
-    bucket = _required_env("OBJECT_STORAGE_BUCKET")
-    prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
-    retrieved_at = datetime.now(timezone.utc)
-    run_id = f"run_{retrieved_at.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
-    country_label = requested_country or "global"
-    object_name = f"{prefix}/newsdata_{country_label}_{run_id}.csv"
-    rows = _bronze_rows(payload, retrieved_at.isoformat())
+    namespace: str,
+    bucket: str,
+    prefix: str,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Collect one ordered country page at a time until the batch is full."""
+
+    try:
+        target_rows = int(os.getenv("NEWSDATA_TARGET_ROWS", "100"))
+    except ValueError as exc:
+        raise RuntimeError("NEWSDATA_TARGET_ROWS must be an integer") from exc
+    if target_rows < 1:
+        raise RuntimeError("NEWSDATA_TARGET_ROWS must be greater than zero")
+
+    try:
+        country_delay = float(os.getenv("NEWSDATA_COUNTRY_DELAY", "2"))
+    except ValueError as exc:
+        raise RuntimeError("NEWSDATA_COUNTRY_DELAY must be a number") from exc
+    if country_delay < 0:
+        raise RuntimeError("NEWSDATA_COUNTRY_DELAY cannot be negative")
 
     dedup_enabled = os.getenv("BRONZE_DEDUP_ENABLED", "1").strip().lower() not in {
         "0",
@@ -461,8 +381,78 @@ def _write_bronze(
     existing_record_ids = (
         _existing_record_ids(client, namespace, bucket, prefix) if dedup_enabled else set()
     )
-    original_row_count = len(rows)
-    rows = [row for row in rows if row["record_id"] not in existing_record_ids]
+    seen_record_ids = set(existing_record_ids)
+    retrieved_at = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, str]] = []
+    country_stats: list[dict[str, Any]] = []
+    countries = _country_sequence()
+    candidates_seen = 0
+    duplicates_skipped = 0
+
+    for country_index, country in enumerate(countries):
+        if len(rows) >= target_rows:
+            break
+
+        payload, request_meta = _request_newsdata(api_key, requested_country=country)
+        candidates = _bronze_rows(payload, retrieved_at)
+        country_candidates = len(candidates)
+        country_duplicates = 0
+        country_new = 0
+
+        for row in candidates:
+            candidates_seen += 1
+            if row["record_id"] in seen_record_ids:
+                country_duplicates += 1
+                duplicates_skipped += 1
+                continue
+            seen_record_ids.add(row["record_id"])
+            rows.append(row)
+            country_new += 1
+            if len(rows) >= target_rows:
+                break
+
+        country_stats.append(
+            {
+                "country": country,
+                "country_index": country_index,
+                "candidate_rows": country_candidates,
+                "new_rows": country_new,
+                "duplicates_skipped": country_duplicates,
+                "request": request_meta,
+            }
+        )
+        if len(rows) >= target_rows:
+            break
+        if country_delay and country_index < len(countries) - 1:
+            time.sleep(country_delay)
+
+    request_meta = {
+        "mode": "ordered_country_batch",
+        "target_rows": target_rows,
+        "countries_configured": countries,
+        "countries_attempted": [item["country"] for item in country_stats],
+        "requests_made": len(country_stats),
+        "candidate_rows": candidates_seen,
+        "new_rows": len(rows),
+        "duplicates_skipped": duplicates_skipped,
+        "existing_record_ids": len(existing_record_ids),
+        "dedup_enabled": dedup_enabled,
+        "country_stats": country_stats,
+    }
+    return rows, request_meta
+
+
+def _write_bronze(
+    rows: list[dict[str, str]],
+    request_meta: dict[str, Any],
+    client: Any,
+) -> dict[str, str]:
+    namespace = _required_env("OBJECT_STORAGE_NAMESPACE")
+    bucket = _required_env("OBJECT_STORAGE_BUCKET")
+    prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
+    retrieved_at = datetime.now(timezone.utc)
+    run_id = f"run_{retrieved_at.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
+    object_name = f"{prefix}/newsdata_batch_{run_id}.csv"
 
     csv_buffer = io.StringIO(newline="")
     writer = csv.DictWriter(csv_buffer, fieldnames=BRONZE_FIELDS, extrasaction="ignore")
@@ -479,21 +469,20 @@ def _write_bronze(
     )
     return {
         "run_id": run_id,
-        "requested_country": requested_country,
         "bucket": bucket,
         "object_name": object_name,
         "row_count": str(len(rows)),
-        "candidate_row_count": str(original_row_count),
-        "duplicates_skipped": str(original_row_count - len(rows)),
-        "existing_record_ids": str(len(existing_record_ids)),
-        "dedup_enabled": str(dedup_enabled).lower(),
-        "request_total_results": str(payload.get("totalResults") or 0),
+        "candidate_row_count": str(request_meta["candidate_rows"]),
+        "duplicates_skipped": str(request_meta["duplicates_skipped"]),
+        "existing_record_ids": str(request_meta["existing_record_ids"]),
+        "dedup_enabled": str(request_meta["dedup_enabled"]).lower(),
+        "countries_attempted": ",".join(request_meta["countries_attempted"]),
         "request_meta": json.dumps(request_meta, ensure_ascii=False),
     }
 
 
 def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
-    """Fetch one country and write its deduplicated Bronze CSV."""
+    """Fetch ordered country pages and write one deduplicated Bronze CSV."""
 
     try:
         secret_id = _required_env("NEWSDATA_SECRET_OCID")
@@ -504,41 +493,14 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         bucket = _required_env("OBJECT_STORAGE_BUCKET")
         prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
         client = _object_storage_client()
-        cursor = _coverage_cursor(client, namespace, bucket, prefix)
-        requested_country = (
-            cursor["country"] if cursor is not None else os.getenv("NEWSDATA_COUNTRY", "").strip().lower()
+        rows, request_meta = _collect_country_batch(
+            api_key,
+            client,
+            namespace,
+            bucket,
+            prefix,
         )
-        payload, request_meta = _request_newsdata(api_key, requested_country=requested_country)
-        result = _write_bronze(payload, request_meta, requested_country, client)
-
-        if cursor is not None:
-            sequence = cursor["country_sequence"]
-            next_index = cursor["country_index"] + 1
-            next_cycle = cursor["cycle"]
-            if next_index >= len(sequence):
-                next_index = 0
-                next_cycle += 1
-            next_state = {
-                "country_sequence": sequence,
-                "next_index": next_index,
-                "next_country": sequence[next_index],
-                "cycle": next_cycle,
-                "last_country": requested_country,
-                "last_run_id": result["run_id"],
-                "last_row_count": int(result["row_count"]),
-                "last_duplicates_skipped": int(result["duplicates_skipped"]),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-            _save_coverage_state(client, namespace, bucket, prefix, next_state)
-            result.update(
-                {
-                    "coverage_cycle": str(cursor["cycle"]),
-                    "country_index": str(cursor["country_index"]),
-                    "next_country": next_state["next_country"],
-                }
-            )
-        else:
-            result["coverage_mode"] = "explicit_country"
+        result = _write_bronze(rows, request_meta, client)
         LOGGER.info("Bronze CSV written: %s (%s rows)", result["object_name"], result["row_count"])
         return response.Response(
             ctx,
