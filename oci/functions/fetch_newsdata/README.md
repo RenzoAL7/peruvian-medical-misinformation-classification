@@ -1,9 +1,10 @@
 # `fetch-newsdata`
 
 First OCI Function in the thesis pipeline. It reads the NewsData API key from
-OCI Vault, requests Spanish health news (without a country restriction by
-default), and writes the original response plus run metadata to the Bronze
-layer in Object Storage.
+OCI Vault, requests Spanish health news country by country in a fixed order,
+and writes one deduplicated CSV per run to the flat `bronze/` prefix in Object
+Storage. The CSV follows the Bronze columns used by the thesis spreadsheet and
+includes the publisher country.
 
 ## Required function configuration
 
@@ -13,21 +14,62 @@ Set these application/function environment variables in OCI:
 NEWSDATA_SECRET_OCID=<OCID of the newsdata-api-key secret>
 OBJECT_STORAGE_NAMESPACE=<tenancy Object Storage namespace>
 OBJECT_STORAGE_BUCKET=mednews-data
-BRONZE_PREFIX=bronze/newsdata
+BRONZE_PREFIX=bronze
+BRONZE_DEDUP_ENABLED=1
 NEWSDATA_LANGUAGE=es
 NEWSDATA_CATEGORY=health
+NEWSDATA_SIZE=10
+NEWSDATA_MAX_PAGES=3
+NEWSDATA_TARGET_ROWS=100
+NEWSDATA_COUNTRY_GROUP_SIZE=5
+NEWSDATA_COUNTRY_DELAY=2
+NEWSDATA_PAGE_DELAY=4
+NEWSDATA_MAX_RETRIES=2
+NEWSDATA_REMOVEDUPLICATE=1
+NEWSDATA_VIDEO=0
+NEWSDATA_COUNTRY_SEQUENCE=ar,bo,cl,co,cr,cu,do,ec,es,gt,gq,hn,mx,ni,pa,pe,pr,py,sv,uy,ve
 ```
 
-Optional filters are `NEWSDATA_QUERY`, `NEWSDATA_COUNTRY`, and
-`NEWSDATA_ENDPOINT`. The country variable is empty by default so the first
-global Spanish-language run is not limited to Peru.
+`NEWSDATA_QUERY` and `NEWSDATA_ENDPOINT` remain optional filters. The function
+splits `NEWSDATA_COUNTRY_SEQUENCE` into groups of up to five countries (the
+NewsData limit), requests each group in order, and sorts the resulting rows
+back into the configured country order before writing the CSV. It appends new
+rows until `NEWSDATA_TARGET_ROWS` is reached. Puerto Rico (`pr`) is
+intentionally included as a separate territory. The order restarts at `ar` on
+the next invocation; no cursor or state JSON is needed.
+
+The default medical query includes general terms such as `salud`, `médico`,
+`medicina`, `enfermedad`, and `hospital` in addition to specific terms such as
+`cáncer`, `diabetes`, `vacuna`, and `tratamiento`.
+
+With `BRONZE_DEDUP_ENABLED=1`, each run reads prior CSVs under `bronze/` and
+skips any `record_id` already stored there and also removes duplicates between
+countries in the current run. This prevents the same canonical URL from
+returning in multiple runs while the API's latest feed covers overlapping
+48-hour windows. `NEWSDATA_MAX_PAGES` controls pages per country group;
+`NEWSDATA_COUNTRY_GROUP_SIZE=5` and three pages mean at most 15 API requests
+for a full 21-country pass, compared with one request for every country. Each
+extra page is another API request. `NEWSDATA_COUNTRY_DELAY` spaces country
+group requests, while
+`NEWSDATA_PAGE_DELAY` spaces pages within a country group and
+`NEWSDATA_MAX_RETRIES` retries temporary HTTP 429 responses. If fewer than the
+target number of new articles exist in the available country pages, the CSV
+contains the available rows rather than repeating old records. The default
+query searches for common medical terms.
 
 The function writes objects like:
 
 ```text
-bronze/newsdata/2026/10/04/run_20261004T000000Z_ab12cd34.json
+bronze/newsdata_batch_run_20261004T000000Z_ab12cd34.csv
 ```
 
-No API key is stored in this directory or in the JSON object. The Function
-must use a resource principal with permission to read the Vault secret and
-write objects in `mednews-data`.
+The CSV columns are:
+
+```text
+record_id,source_name,canonical_url,published_at,title,
+subtitle_or_bajada,topic,selection_status,retrieved_at,country
+```
+
+No API key is stored in the CSV. The Function must use a resource principal
+with permission to read the Vault secret and create objects in `mednews-data`
+whose name matches `bronze/*`.
