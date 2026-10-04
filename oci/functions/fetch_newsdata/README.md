@@ -18,14 +18,22 @@ BRONZE_PREFIX=bronze
 NEWSDATA_LANGUAGE=es
 NEWSDATA_CATEGORY=health
 NEWSDATA_SIZE=10
+NEWSDATA_MAX_PAGES=10
+NEWSDATA_PAGE_DELAY=4
+NEWSDATA_MAX_RETRIES=2
 NEWSDATA_REMOVEDUPLICATE=1
 NEWSDATA_VIDEO=0
 ```
 
 Optional filters are `NEWSDATA_QUERY`, `NEWSDATA_COUNTRY`, and
-`NEWSDATA_ENDPOINT`. The default query searches for common medical terms. The
-country variable is empty by default so a global Spanish-language run is not
-limited to Peru.
+`NEWSDATA_ENDPOINT`. `NEWSDATA_MAX_PAGES` follows the `nextPage` cursor and
+allows up to 10 pages of 10 articles (up to 100 articles and 10 API credits
+per run on the free plan). `NEWSDATA_PAGE_DELAY` spaces requests to respect
+the provider rate limit, while `NEWSDATA_MAX_RETRIES` retries temporary HTTP
+429 responses. The page limit can be raised to 30 for a planned 300-article
+batch, but smaller batches are safer for a single Function invocation. The
+default query searches for common medical terms. The country variable is
+empty by default so a global Spanish-language run is not limited to Peru.
 
 The function writes objects like:
 

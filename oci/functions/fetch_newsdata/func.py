@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -156,31 +157,99 @@ def _request_newsdata(api_key: str) -> tuple[dict[str, Any], dict[str, str]]:
     if country:
         params["country"] = country
 
-    request = Request(
-        f"{endpoint}?{urlencode(params)}",
-        headers={"Accept": "application/json", "User-Agent": "mednews-oci/0.1"},
-        method="GET",
-    )
     try:
-        with urlopen(request, timeout=float(os.getenv("NEWSDATA_TIMEOUT", "30"))) as result:
-            raw = result.read()
-            status = str(result.status)
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"NewsData returned HTTP {exc.code}: {body[:500]}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"NewsData request failed: {exc.reason}") from exc
+        max_pages = int(os.getenv("NEWSDATA_MAX_PAGES", "1"))
+    except ValueError as exc:
+        raise RuntimeError("NEWSDATA_MAX_PAGES must be an integer") from exc
+    if not 1 <= max_pages <= 100:
+        raise RuntimeError("NEWSDATA_MAX_PAGES must be between 1 and 100")
 
     try:
-        payload = json.loads(raw.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("NewsData returned a non-JSON response") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("NewsData returned an unexpected JSON shape")
+        timeout = float(os.getenv("NEWSDATA_TIMEOUT", "30"))
+    except ValueError as exc:
+        raise RuntimeError("NEWSDATA_TIMEOUT must be a number") from exc
+    try:
+        page_delay = float(os.getenv("NEWSDATA_PAGE_DELAY", "2"))
+        max_retries = int(os.getenv("NEWSDATA_MAX_RETRIES", "3"))
+    except ValueError as exc:
+        raise RuntimeError("NEWSDATA_PAGE_DELAY and NEWSDATA_MAX_RETRIES must be numeric") from exc
+    if page_delay < 0 or max_retries < 0:
+        raise RuntimeError("NEWSDATA_PAGE_DELAY and NEWSDATA_MAX_RETRIES cannot be negative")
 
+    all_results: list[Any] = []
+    first_payload: dict[str, Any] | None = None
+    next_page: str | None = None
+    pages_fetched = 0
+    last_status = ""
+
+    while pages_fetched < max_pages:
+        if pages_fetched and page_delay:
+            time.sleep(page_delay)
+        page_params = dict(params)
+        if next_page:
+            page_params["page"] = next_page
+        request = Request(
+            f"{endpoint}?{urlencode(page_params)}",
+            headers={"Accept": "application/json", "User-Agent": "mednews-oci/0.1"},
+            method="GET",
+        )
+        for attempt in range(max_retries + 1):
+            try:
+                with urlopen(request, timeout=timeout) as result:
+                    raw = result.read()
+                    last_status = str(result.status)
+                break
+            except HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                if exc.code != 429 or attempt >= max_retries:
+                    raise RuntimeError(f"NewsData returned HTTP {exc.code}: {body[:500]}") from exc
+                retry_after = exc.headers.get("Retry-After", "")
+                try:
+                    retry_delay = max(float(retry_after), 2.0 ** (attempt + 1))
+                except ValueError:
+                    retry_delay = 2.0 ** (attempt + 1)
+                LOGGER.warning(
+                    "NewsData rate limit on page %s; retrying in %.1f seconds",
+                    pages_fetched + 1,
+                    retry_delay,
+                )
+                time.sleep(retry_delay)
+            except URLError as exc:
+                raise RuntimeError(f"NewsData request failed: {exc.reason}") from exc
+
+        try:
+            page_payload = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("NewsData returned a non-JSON response") from exc
+        if not isinstance(page_payload, dict):
+            raise RuntimeError("NewsData returned an unexpected JSON shape")
+        if first_payload is None:
+            first_payload = page_payload
+
+        page_results = page_payload.get("results") or []
+        if isinstance(page_results, list):
+            all_results.extend(page_results)
+        pages_fetched += 1
+        next_page_value = page_payload.get("nextPage")
+        next_page = str(next_page_value).strip() if next_page_value else None
+        if not next_page:
+            break
+
+    payload = dict(first_payload or {})
+    payload["results"] = all_results
     safe_params = {key: value for key, value in params.items() if key != "apikey"}
-    safe_params["endpoint"] = endpoint
-    safe_params["http_status"] = status
+    safe_params.update(
+        {
+            "endpoint": endpoint,
+            "http_status": last_status,
+            "max_pages": str(max_pages),
+            "pages_fetched": str(pages_fetched),
+            "articles_received": str(len(all_results)),
+            "next_page_available": str(bool(next_page)).lower(),
+            "page_delay_seconds": str(page_delay),
+            "max_retries": str(max_retries),
+        }
+    )
     return payload, safe_params
 
 
