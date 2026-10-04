@@ -46,6 +46,32 @@ BRONZE_FIELDS = [
 
 TRACKING_PARAMETERS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 
+# One country is processed per invocation.  Puerto Rico is included as a
+# separate territory so its coverage is visible in the audit trail.
+DEFAULT_COUNTRY_SEQUENCE = (
+    "ar",
+    "bo",
+    "cl",
+    "co",
+    "cr",
+    "cu",
+    "do",
+    "ec",
+    "es",
+    "gt",
+    "gq",
+    "hn",
+    "mx",
+    "ni",
+    "pa",
+    "pe",
+    "pr",
+    "py",
+    "sv",
+    "uy",
+    "ve",
+)
+
 
 def _required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -86,6 +112,112 @@ def _list_value(value: Any) -> str:
     if isinstance(value, list):
         return ",".join(str(item).strip() for item in value if str(item).strip())
     return str(value or "").strip()
+
+
+def _country_sequence() -> list[str]:
+    """Return the ordered country cycle used by automatic collection."""
+
+    configured = os.getenv("NEWSDATA_COUNTRY_SEQUENCE", "").strip()
+    values = configured.split(",") if configured else list(DEFAULT_COUNTRY_SEQUENCE)
+    sequence = [value.strip().lower() for value in values if value.strip()]
+    if not sequence:
+        raise RuntimeError("NEWSDATA_COUNTRY_SEQUENCE cannot be empty")
+    if any(len(value) != 2 for value in sequence):
+        raise RuntimeError("NEWSDATA_COUNTRY_SEQUENCE must contain ISO-2 country codes")
+    return sequence
+
+
+def _object_storage_client() -> Any:
+    signer = oci.auth.signers.get_resource_principals_signer()
+    return oci.object_storage.ObjectStorageClient(config={}, signer=signer)
+
+
+def _state_object_name(prefix: str) -> str:
+    return f"{prefix}/newsdata_coverage_state.json" if prefix else "newsdata_coverage_state.json"
+
+
+def _load_coverage_state(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    prefix: str,
+) -> dict[str, Any]:
+    """Load the country cursor; a missing state starts the first cycle."""
+
+    try:
+        object_response = client.get_object(
+            namespace_name=namespace,
+            bucket_name=bucket,
+            object_name=_state_object_name(prefix),
+        )
+    except oci.exceptions.ServiceError as exc:
+        if exc.status == 404:
+            return {}
+        raise
+
+    content = object_response.data.content
+    if hasattr(content, "read"):
+        content = content.read()
+    try:
+        state = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("The country coverage state is not valid JSON") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError("The country coverage state must be a JSON object")
+    return state
+
+
+def _coverage_cursor(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    prefix: str,
+) -> dict[str, Any] | None:
+    """Select the next country unless an explicit country override is set."""
+
+    explicit_country = os.getenv("NEWSDATA_COUNTRY", "").strip().lower()
+    if explicit_country:
+        return None
+
+    sequence = _country_sequence()
+    state = _load_coverage_state(client, namespace, bucket, prefix)
+    stored_sequence = state.get("country_sequence")
+    if stored_sequence != sequence:
+        state = {"country_sequence": sequence, "next_index": 0, "cycle": 1}
+
+    try:
+        next_index = int(state.get("next_index", 0))
+        cycle = int(state.get("cycle", 1))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("The country coverage cursor is invalid") from exc
+    if not 0 <= next_index < len(sequence):
+        next_index = 0
+    if cycle < 1:
+        cycle = 1
+
+    return {
+        "country_sequence": sequence,
+        "country_index": next_index,
+        "cycle": cycle,
+        "country": sequence[next_index],
+    }
+
+
+def _save_coverage_state(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    prefix: str,
+    state: dict[str, Any],
+) -> None:
+    encoded = json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8")
+    client.put_object(
+        namespace_name=namespace,
+        bucket_name=bucket,
+        object_name=_state_object_name(prefix),
+        put_object_body=io.BytesIO(encoded),
+        content_type="application/json; charset=utf-8",
+    )
 
 
 def _bronze_rows(payload: dict[str, Any], retrieved_at: str) -> list[dict[str, str]]:
@@ -182,7 +314,10 @@ def _existing_record_ids(
     return record_ids
 
 
-def _request_newsdata(api_key: str) -> tuple[dict[str, Any], dict[str, str]]:
+def _request_newsdata(
+    api_key: str,
+    requested_country: str | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
     endpoint = os.getenv("NEWSDATA_ENDPOINT", "https://newsdata.io/api/1/latest").strip()
     params: dict[str, str] = {
         "apikey": api_key,
@@ -196,7 +331,11 @@ def _request_newsdata(api_key: str) -> tuple[dict[str, Any], dict[str, str]]:
         "NEWSDATA_QUERY",
         "(cáncer OR diabetes OR vacuna OR medicamento OR tratamiento)",
     ).strip()
-    country = os.getenv("NEWSDATA_COUNTRY", "").strip()
+    country = (
+        requested_country.strip().lower()
+        if requested_country is not None
+        else os.getenv("NEWSDATA_COUNTRY", "").strip().lower()
+    )
     if query:
         params["q"] = query
     if country:
@@ -286,6 +425,7 @@ def _request_newsdata(api_key: str) -> tuple[dict[str, Any], dict[str, str]]:
     safe_params.update(
         {
             "endpoint": endpoint,
+            "requested_country": country,
             "http_status": last_status,
             "max_pages": str(max_pages),
             "pages_fetched": str(pages_fetched),
@@ -298,17 +438,21 @@ def _request_newsdata(api_key: str) -> tuple[dict[str, Any], dict[str, str]]:
     return payload, safe_params
 
 
-def _write_bronze(payload: dict[str, Any], request_meta: dict[str, str]) -> dict[str, str]:
+def _write_bronze(
+    payload: dict[str, Any],
+    request_meta: dict[str, str],
+    requested_country: str,
+    client: Any,
+) -> dict[str, str]:
     namespace = _required_env("OBJECT_STORAGE_NAMESPACE")
     bucket = _required_env("OBJECT_STORAGE_BUCKET")
     prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
     retrieved_at = datetime.now(timezone.utc)
     run_id = f"run_{retrieved_at.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
-    object_name = f"{prefix}/newsdata_{run_id}.csv"
+    country_label = requested_country or "global"
+    object_name = f"{prefix}/newsdata_{country_label}_{run_id}.csv"
     rows = _bronze_rows(payload, retrieved_at.isoformat())
 
-    signer = oci.auth.signers.get_resource_principals_signer()
-    client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
     dedup_enabled = os.getenv("BRONZE_DEDUP_ENABLED", "1").strip().lower() not in {
         "0",
         "false",
@@ -335,6 +479,7 @@ def _write_bronze(payload: dict[str, Any], request_meta: dict[str, str]) -> dict
     )
     return {
         "run_id": run_id,
+        "requested_country": requested_country,
         "bucket": bucket,
         "object_name": object_name,
         "row_count": str(len(rows)),
@@ -348,15 +493,52 @@ def _write_bronze(payload: dict[str, Any], request_meta: dict[str, str]) -> dict
 
 
 def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
-    """Fetch NewsData and write the Bronze CSV."""
+    """Fetch one country and write its deduplicated Bronze CSV."""
 
     try:
         secret_id = _required_env("NEWSDATA_SECRET_OCID")
         api_key = _secret_value(secret_id)
         if not api_key:
             raise RuntimeError("The NewsData secret is empty")
-        payload, request_meta = _request_newsdata(api_key)
-        result = _write_bronze(payload, request_meta)
+        namespace = _required_env("OBJECT_STORAGE_NAMESPACE")
+        bucket = _required_env("OBJECT_STORAGE_BUCKET")
+        prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
+        client = _object_storage_client()
+        cursor = _coverage_cursor(client, namespace, bucket, prefix)
+        requested_country = (
+            cursor["country"] if cursor is not None else os.getenv("NEWSDATA_COUNTRY", "").strip().lower()
+        )
+        payload, request_meta = _request_newsdata(api_key, requested_country=requested_country)
+        result = _write_bronze(payload, request_meta, requested_country, client)
+
+        if cursor is not None:
+            sequence = cursor["country_sequence"]
+            next_index = cursor["country_index"] + 1
+            next_cycle = cursor["cycle"]
+            if next_index >= len(sequence):
+                next_index = 0
+                next_cycle += 1
+            next_state = {
+                "country_sequence": sequence,
+                "next_index": next_index,
+                "next_country": sequence[next_index],
+                "cycle": next_cycle,
+                "last_country": requested_country,
+                "last_run_id": result["run_id"],
+                "last_row_count": int(result["row_count"]),
+                "last_duplicates_skipped": int(result["duplicates_skipped"]),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _save_coverage_state(client, namespace, bucket, prefix, next_state)
+            result.update(
+                {
+                    "coverage_cycle": str(cursor["cycle"]),
+                    "country_index": str(cursor["country_index"]),
+                    "next_country": next_state["next_country"],
+                }
+            )
+        else:
+            result["coverage_mode"] = "explicit_country"
         LOGGER.info("Bronze CSV written: %s (%s rows)", result["object_name"], result["row_count"])
         return response.Response(
             ctx,
