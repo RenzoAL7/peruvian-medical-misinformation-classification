@@ -15,6 +15,7 @@ NEWSDATA_SECRET_OCID=<OCID of the newsdata-api-key secret>
 OBJECT_STORAGE_NAMESPACE=<tenancy Object Storage namespace>
 OBJECT_STORAGE_BUCKET=mednews-data
 BRONZE_PREFIX=bronze
+BRONZE_DEDUP_ENABLED=1
 NEWSDATA_LANGUAGE=es
 NEWSDATA_CATEGORY=health
 NEWSDATA_SIZE=10
@@ -26,7 +27,11 @@ NEWSDATA_VIDEO=0
 ```
 
 Optional filters are `NEWSDATA_QUERY`, `NEWSDATA_COUNTRY`, and
-`NEWSDATA_ENDPOINT`. `NEWSDATA_MAX_PAGES` follows the `nextPage` cursor and
+`NEWSDATA_ENDPOINT`. With `BRONZE_DEDUP_ENABLED=1`, each run reads prior CSVs
+under `bronze/` and skips any `record_id` already stored there. This prevents
+the same article from returning in multiple runs while the API's latest feed
+covers overlapping 48-hour windows. `NEWSDATA_MAX_PAGES` follows the
+`nextPage` cursor and
 allows up to 10 pages of 10 articles (up to 100 articles and 10 API credits
 per run on the free plan). `NEWSDATA_PAGE_DELAY` spaces requests to respect
 the provider rate limit, while `NEWSDATA_MAX_RETRIES` retries temporary HTTP

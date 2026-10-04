@@ -137,6 +137,51 @@ def _bronze_rows(payload: dict[str, Any], retrieved_at: str) -> list[dict[str, s
     return rows
 
 
+def _existing_record_ids(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    prefix: str,
+) -> set[str]:
+    """Read prior Bronze CSVs so a later 48-hour run cannot repeat records."""
+
+    record_ids: set[str] = set()
+    list_prefix = f"{prefix}/" if prefix else ""
+    start: str | None = None
+
+    while True:
+        response = client.list_objects(
+            namespace_name=namespace,
+            bucket_name=bucket,
+            prefix=list_prefix,
+            start=start,
+            fields="name",
+            limit=1000,
+        )
+        for item in response.data.objects:
+            object_name = str(item.name)
+            if not object_name.endswith(".csv"):
+                continue
+            object_response = client.get_object(
+                namespace_name=namespace,
+                bucket_name=bucket,
+                object_name=object_name,
+            )
+            content = object_response.data.content
+            if hasattr(content, "read"):
+                content = content.read()
+            reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
+            for row in reader:
+                record_id = str(row.get("record_id") or "").strip()
+                if record_id:
+                    record_ids.add(record_id)
+
+        start = response.data.next_start_with
+        if not start:
+            break
+    return record_ids
+
+
 def _request_newsdata(api_key: str) -> tuple[dict[str, Any], dict[str, str]]:
     endpoint = os.getenv("NEWSDATA_ENDPOINT", "https://newsdata.io/api/1/latest").strip()
     params: dict[str, str] = {
@@ -261,14 +306,26 @@ def _write_bronze(payload: dict[str, Any], request_meta: dict[str, str]) -> dict
     run_id = f"run_{retrieved_at.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
     object_name = f"{prefix}/newsdata_{run_id}.csv"
     rows = _bronze_rows(payload, retrieved_at.isoformat())
+
+    signer = oci.auth.signers.get_resource_principals_signer()
+    client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
+    dedup_enabled = os.getenv("BRONZE_DEDUP_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+    existing_record_ids = (
+        _existing_record_ids(client, namespace, bucket, prefix) if dedup_enabled else set()
+    )
+    original_row_count = len(rows)
+    rows = [row for row in rows if row["record_id"] not in existing_record_ids]
+
     csv_buffer = io.StringIO(newline="")
     writer = csv.DictWriter(csv_buffer, fieldnames=BRONZE_FIELDS, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
     encoded = csv_buffer.getvalue().encode("utf-8-sig")
 
-    signer = oci.auth.signers.get_resource_principals_signer()
-    client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
     client.put_object(
         namespace_name=namespace,
         bucket_name=bucket,
@@ -281,6 +338,10 @@ def _write_bronze(payload: dict[str, Any], request_meta: dict[str, str]) -> dict
         "bucket": bucket,
         "object_name": object_name,
         "row_count": str(len(rows)),
+        "candidate_row_count": str(original_row_count),
+        "duplicates_skipped": str(original_row_count - len(rows)),
+        "existing_record_ids": str(len(existing_record_ids)),
+        "dedup_enabled": str(dedup_enabled).lower(),
         "request_total_results": str(payload.get("totalResults") or 0),
         "request_meta": json.dumps(request_meta, ensure_ascii=False),
     }
