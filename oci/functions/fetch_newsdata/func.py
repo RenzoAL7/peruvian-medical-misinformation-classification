@@ -72,6 +72,30 @@ DEFAULT_COUNTRY_SEQUENCE = (
     "ve",
 )
 
+COUNTRY_NAME_ALIASES = {
+    "ar": ("argentina",),
+    "bo": ("bolivia",),
+    "cl": ("chile",),
+    "co": ("colombia",),
+    "cr": ("costa rica",),
+    "cu": ("cuba",),
+    "do": ("dominican republic",),
+    "ec": ("ecuador",),
+    "es": ("spain",),
+    "gt": ("guatemala",),
+    "gq": ("equatorial guinea",),
+    "hn": ("honduras",),
+    "mx": ("mexico",),
+    "ni": ("nicaragua",),
+    "pa": ("panama",),
+    "pe": ("peru",),
+    "pr": ("puerto rico",),
+    "py": ("paraguay",),
+    "sv": ("el salvador",),
+    "uy": ("uruguay",),
+    "ve": ("venezuela",),
+}
+
 
 def _required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -125,6 +149,16 @@ def _country_sequence() -> list[str]:
     if any(len(value) != 2 for value in sequence):
         raise RuntimeError("NEWSDATA_COUNTRY_SEQUENCE must contain ISO-2 country codes")
     return sequence
+
+
+def _country_rank(row: dict[str, str], sequence: list[str]) -> int:
+    """Sort API results into the configured country order for the CSV."""
+
+    country_text = row.get("country", "").casefold()
+    for index, code in enumerate(sequence):
+        if any(alias in country_text for alias in COUNTRY_NAME_ALIASES.get(code, ())):
+            return index
+    return len(sequence)
 
 
 def _object_storage_client() -> Any:
@@ -241,7 +275,8 @@ def _request_newsdata(
     }
     query = os.getenv(
         "NEWSDATA_QUERY",
-        "(cáncer OR diabetes OR vacuna OR medicamento OR tratamiento)",
+        "(salud OR médico OR enfermedad OR hospital OR vacuna OR medicamento "
+        "OR cáncer OR diabetes)",
     ).strip()
     country = (
         requested_country.strip().lower()
@@ -367,6 +402,13 @@ def _collect_country_batch(
         raise RuntimeError("NEWSDATA_TARGET_ROWS must be greater than zero")
 
     try:
+        country_group_size = int(os.getenv("NEWSDATA_COUNTRY_GROUP_SIZE", "5"))
+    except ValueError as exc:
+        raise RuntimeError("NEWSDATA_COUNTRY_GROUP_SIZE must be an integer") from exc
+    if not 1 <= country_group_size <= 5:
+        raise RuntimeError("NEWSDATA_COUNTRY_GROUP_SIZE must be between 1 and 5")
+
+    try:
         country_delay = float(os.getenv("NEWSDATA_COUNTRY_DELAY", "2"))
     except ValueError as exc:
         raise RuntimeError("NEWSDATA_COUNTRY_DELAY must be a number") from exc
@@ -386,18 +428,27 @@ def _collect_country_batch(
     rows: list[dict[str, str]] = []
     country_stats: list[dict[str, Any]] = []
     countries = _country_sequence()
+    country_groups = [
+        countries[index : index + country_group_size]
+        for index in range(0, len(countries), country_group_size)
+    ]
     candidates_seen = 0
     duplicates_skipped = 0
 
-    for country_index, country in enumerate(countries):
+    for group_index, country_group in enumerate(country_groups):
         if len(rows) >= target_rows:
             break
 
-        payload, request_meta = _request_newsdata(api_key, requested_country=country)
+        requested_country = ",".join(country_group)
+        payload, request_meta = _request_newsdata(
+            api_key,
+            requested_country=requested_country,
+        )
         candidates = _bronze_rows(payload, retrieved_at)
         country_candidates = len(candidates)
         country_duplicates = 0
         country_new = 0
+        candidates = sorted(candidates, key=lambda row: _country_rank(row, countries))
 
         for row in candidates:
             candidates_seen += 1
@@ -413,8 +464,8 @@ def _collect_country_batch(
 
         country_stats.append(
             {
-                "country": country,
-                "country_index": country_index,
+                "countries": country_group,
+                "group_index": group_index,
                 "candidate_rows": country_candidates,
                 "new_rows": country_new,
                 "duplicates_skipped": country_duplicates,
@@ -423,15 +474,26 @@ def _collect_country_batch(
         )
         if len(rows) >= target_rows:
             break
-        if country_delay and country_index < len(countries) - 1:
+        if country_delay and group_index < len(country_groups) - 1:
             time.sleep(country_delay)
 
+    rows.sort(key=lambda row: _country_rank(row, countries))
+    countries_attempted = [
+        country
+        for group in country_stats
+        for country in group["countries"]
+    ]
+
     request_meta = {
-        "mode": "ordered_country_batch",
+        "mode": "grouped_ordered_country_batch",
         "target_rows": target_rows,
+        "country_group_size": country_group_size,
         "countries_configured": countries,
-        "countries_attempted": [item["country"] for item in country_stats],
-        "requests_made": len(country_stats),
+        "countries_attempted": countries_attempted,
+        "groups_attempted": len(country_stats),
+        "requests_made": sum(
+            int(item["request"].get("pages_fetched", "0")) for item in country_stats
+        ),
         "candidate_rows": candidates_seen,
         "new_rows": len(rows),
         "duplicates_skipped": duplicates_skipped,

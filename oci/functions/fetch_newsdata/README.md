@@ -19,8 +19,9 @@ BRONZE_DEDUP_ENABLED=1
 NEWSDATA_LANGUAGE=es
 NEWSDATA_CATEGORY=health
 NEWSDATA_SIZE=10
-NEWSDATA_MAX_PAGES=1
+NEWSDATA_MAX_PAGES=3
 NEWSDATA_TARGET_ROWS=100
+NEWSDATA_COUNTRY_GROUP_SIZE=5
 NEWSDATA_COUNTRY_DELAY=2
 NEWSDATA_PAGE_DELAY=4
 NEWSDATA_MAX_RETRIES=2
@@ -30,20 +31,27 @@ NEWSDATA_COUNTRY_SEQUENCE=ar,bo,cl,co,cr,cu,do,ec,es,gt,gq,hn,mx,ni,pa,pe,pr,py,
 ```
 
 `NEWSDATA_QUERY` and `NEWSDATA_ENDPOINT` remain optional filters. The function
-uses `NEWSDATA_COUNTRY_SEQUENCE` as an ordered list and makes one request per
-country in that order during the same invocation. It appends new rows until
-`NEWSDATA_TARGET_ROWS` is reached, then writes one CSV. Puerto Rico (`pr`) is
+splits `NEWSDATA_COUNTRY_SEQUENCE` into groups of up to five countries (the
+NewsData limit), requests each group in order, and sorts the resulting rows
+back into the configured country order before writing the CSV. It appends new
+rows until `NEWSDATA_TARGET_ROWS` is reached. Puerto Rico (`pr`) is
 intentionally included as a separate territory. The order restarts at `ar` on
 the next invocation; no cursor or state JSON is needed.
+
+The default medical query includes general terms such as `salud`, `médico`,
+`medicina`, `enfermedad`, and `hospital` in addition to specific terms such as
+`cáncer`, `diabetes`, `vacuna`, and `tratamiento`.
 
 With `BRONZE_DEDUP_ENABLED=1`, each run reads prior CSVs under `bronze/` and
 skips any `record_id` already stored there and also removes duplicates between
 countries in the current run. This prevents the same canonical URL from
 returning in multiple runs while the API's latest feed covers overlapping
-48-hour windows. `NEWSDATA_MAX_PAGES=1` keeps the first pass to one request per
-country; increase it only deliberately because each extra page is another API
-request. `NEWSDATA_COUNTRY_DELAY` spaces country requests, while
-`NEWSDATA_PAGE_DELAY` spaces pages within a country and
+48-hour windows. `NEWSDATA_MAX_PAGES` controls pages per country group;
+`NEWSDATA_COUNTRY_GROUP_SIZE=5` and three pages mean at most 15 API requests
+for a full 21-country pass, compared with one request for every country. Each
+extra page is another API request. `NEWSDATA_COUNTRY_DELAY` spaces country
+group requests, while
+`NEWSDATA_PAGE_DELAY` spaces pages within a country group and
 `NEWSDATA_MAX_RETRIES` retries temporary HTTP 429 responses. If fewer than the
 target number of new articles exist in the available country pages, the CSV
 contains the available rows rather than repeating old records. The default
