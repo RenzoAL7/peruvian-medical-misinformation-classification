@@ -1,8 +1,23 @@
 # Corpus de noticias médicas peruanas
 
-Este repositorio contiene únicamente el recolector utilizado por el notebook de Google Colab del proyecto. Su función es descubrir noticias candidatas y conservar su trazabilidad. No decide si una noticia es médica ni asigna etiquetas de veracidad.
+Este repositorio contiene el recolector y las OCI Functions del pipeline cloud del proyecto. Descubre noticias candidatas, conserva su trazabilidad y prepara el cuerpo textual para Silver. No decide si una noticia es médica ni asigna etiquetas de veracidad.
 
-## Flujo vigente
+## Pipeline OCI en la nube
+
+Las Functions desplegadas en OCI separan las etapas de datos:
+
+1. `fetch-newsdata` consulta NewsData y escribe lotes deduplicados en `bronze/`.
+2. `extract-news-body` recorre los CSV Bronze en orden, combina archivos para
+   formar lotes de hasta 50 filas pendientes y escribe los cuerpos en `silver/`.
+3. La revisión humana delimita la afirmación, reúne evidencia y asigna la
+   etiqueta antes de construir Gold.
+
+La extracción del cuerpo conserva estados `OK`, `CUERPO_INSUFICIENTE` y errores
+HTTP para que una URL bloqueada no desaparezca del registro. El Function deja
+un margen interno antes del límite de 300 segundos y continúa con las filas
+pendientes en la siguiente ejecución.
+
+## Flujo local de referencia
 
 1. El Colab lee los `record_id` existentes en la pestaña `Bronze` de Google Sheets.
 2. Ejecuta `scripts/01_collect_newsdata_urls.py` y le pasa esos identificadores para evitar repeticiones.
