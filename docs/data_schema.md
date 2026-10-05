@@ -41,9 +41,10 @@ anterior y añade:
 | `claim_text_en` | Traducción fiel usada para buscar literatura biomédica. |
 | `pubmed_query_en` | Consulta PubMed en inglés generada para el claim. |
 | `query_status` | `OK`, `ERROR` o `SKIPPED_NOT_ELIGIBLE`. |
-| `pubmed_results_json` | Hasta cinco artículos candidatos con PMID, abstract, URL y similitud. |
+| `pubmed_results_json` | Hasta cinco artículos candidatos con PMID, abstract original en inglés, traducción al español, URL y similitud. |
 | `evidence_status` | `OK`, `NO_RESULTS`, `NO_ABSTRACT` o `ERROR`. |
-| `best_cosine_similarity` | Mejor similitud TF-IDF entre claim y título/abstract; sirve para ordenar, no para etiquetar. |
+| `translation_status` | `OK`, `PARTIAL`, `ERROR`, `NO_ABSTRACTS` o estado de omisión. Un candidato puede marcarse `PARAPHRASED` si Gemini bloquea la traducción literal por recitación. |
+| `best_cosine_similarity` | Mejor similitud TF-IDF entre claim y abstract traducido al español; sirve para ordenar, no para etiquetar. |
 | `main_medical_claim` | Afirmación médica principal delimitada manualmente. |
 | `label` | `PENDIENTE`, `RESPALDADA`, `REFUTADA`, `NO_CONCLUYENTE` o `EXCLUIDA`. |
 | `evidence_url` | Fuente especializada usada para contrastar la afirmación. |
