@@ -9,8 +9,19 @@ Las Functions desplegadas en OCI separan las etapas de datos:
 1. `fetch-newsdata` consulta NewsData y escribe lotes deduplicados en `bronze/`.
 2. `extract-news-body` recorre los CSV Bronze en orden, combina archivos para
    formar lotes de hasta 50 filas pendientes y escribe los cuerpos en `silver/`.
-3. La revisión humana delimita la afirmación, reúne evidencia y asigna la
-   etiqueta antes de construir Gold.
+3. `extract-claims` toma solo cuerpos válidos, genera una afirmación candidata
+   en español y añade `claim_text_en` y `pubmed_query_en`. El modo
+   `enrich_queries` migra CSV de claims creados antes de esos campos.
+4. `retrieve-pubmed-evidence` consulta PubMed para cada claim elegible, guarda
+   hasta cinco artículos por fila en `silver/evidence/` y calcula una similitud
+   TF-IDF reproducible para ordenar los candidatos.
+5. La revisión humana verifica la afirmación y la evidencia, asigna la etiqueta
+   binaria y decide qué filas pasan a Gold.
+
+Los artefactos operativos del pipeline se guardan en Object Storage:
+`bronze/`, `silver/body/`, `silver/claims/` y `silver/evidence/`. Los CSV de
+evidencia son candidatos de recuperación, no etiquetas automáticas: que una
+fila tenga `evidence_status=OK` solo significa que PubMed devolvió artículos.
 
 La extracción del cuerpo conserva estados `OK`, `CUERPO_INSUFICIENTE` y errores
 HTTP para que una URL bloqueada no desaparezca del registro. El Function deja
@@ -24,8 +35,9 @@ pendientes en la siguiente ejecución.
 3. El recolector carga `configs/batch.yaml`, consulta secciones públicas de salud y guarda un CSV temporal de candidatas.
 4. El Colab vuelve a comprobar los identificadores y anexa a `Bronze` únicamente las noticias nuevas.
 5. El investigador revisa manualmente relevancia médica y elegibilidad de la afirmación.
-6. El Colab descarga el cuerpo de las filas aprobadas y las agrega a `Silver` para la posterior validación con evidencia.
-7. El Colab reconstruye `Gold` únicamente con noticias validadas, etiquetadas y aprobadas para entrenamiento.
+6. Las Functions de OCI extraen el cuerpo, generan claims y preparan la búsqueda de evidencia.
+7. La revisión humana valida los artículos recuperados y agrega la etiqueta de veracidad.
+8. El Colab o el proceso de revisión reconstruye `Gold` únicamente con noticias validadas, etiquetadas y aprobadas para entrenamiento.
 
 ## Medios y método de descubrimiento
 
@@ -83,7 +95,7 @@ tests/
   test_batch_contract.py         protege las fuentes y la meta global del batch
   test_repository_hygiene.py     evita versionar datos CSV
 docs/
-  data_schema.md                 columnas de Bronze, Silver y Gold
+  data_schema.md                 columnas de Bronze, Silver, claims, evidencia y Gold
   methodology.md                 metodología implementada
 data/00_control/                 registro temporal de corridas
 data/01_candidates/              CSV temporal de cada corrida

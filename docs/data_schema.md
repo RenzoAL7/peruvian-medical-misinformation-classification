@@ -1,6 +1,9 @@
 # Esquema de datos vigente
 
-Google Sheets es el espacio de trabajo del corpus. El flujo sigue una organización Medallion con las pestañas `Bronze`, `Silver` y `Gold`.
+Object Storage es el espacio operativo del pipeline cloud. El flujo sigue una
+organización Medallion con los prefijos `bronze/`, `silver/` y `gold/`; las
+tablas de revisión pueden exportarse a Google Sheets o Label Studio sin perder
+los identificadores de trazabilidad.
 
 ## Bronze
 
@@ -26,7 +29,10 @@ El Colab elimina duplicados dentro de la corrida y vuelve a consultar los `recor
 
 ## Silver
 
-Solo recibe filas de `Bronze` con `is_medical=SI`, `is_claim_eligible=SI` y `review_status=COMPLETADA`. Conserva la trazabilidad anterior y añade:
+`silver/body/` conserva el resultado técnico de extracción. `silver/claims/`
+recibe únicamente cuerpos válidos y añade el claim candidato. `silver/evidence/`
+guarda candidatos PubMed para los claims elegibles. Conserva la trazabilidad
+anterior y añade:
 
 | Campo | Uso |
 | --- | --- |
@@ -35,6 +41,13 @@ Solo recibe filas de `Bronze` con `is_medical=SI`, `is_claim_eligible=SI` y `rev
 | `extraction_method` | `trafilatura`, respaldo con BeautifulSoup o ausencia de extracción. |
 | `extraction_status` | `OK`, `CUERPO_INSUFICIENTE` o error de descarga. |
 | `extracted_at` | Fecha UTC de extracción. |
+| `claim_text` | Afirmación candidata en español. |
+| `claim_text_en` | Traducción fiel usada para buscar literatura biomédica. |
+| `pubmed_query_en` | Consulta PubMed en inglés generada para el claim. |
+| `query_status` | `OK`, `ERROR` o `SKIPPED_NOT_ELIGIBLE`. |
+| `pubmed_results_json` | Hasta cinco artículos candidatos con PMID, abstract, URL y similitud. |
+| `evidence_status` | `OK`, `NO_RESULTS`, `NO_ABSTRACT` o `ERROR`. |
+| `best_cosine_similarity` | Mejor similitud TF-IDF entre claim y título/abstract; sirve para ordenar, no para etiquetar. |
 | `main_medical_claim` | Afirmación médica principal delimitada manualmente. |
 | `evidence_source`, `evidence_url`, `evidence_excerpt` | Evidencia usada para contrastar la afirmación. |
 | `label`, `label_reason` | Etiqueta manual y su justificación. |

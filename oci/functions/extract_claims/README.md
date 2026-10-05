@@ -9,8 +9,9 @@ request analyzes several articles and returns one validated JSON item per
 read at invocation time from OCI Vault and is never stored in the image or
 repo.
 
-The model is used only to structure the article into a candidate claim. It does
-not decide whether the claim is true or false. Human review and evidence are
+The model is used only to structure the article into a candidate claim and to
+prepare a faithful English rendering plus a PubMed search query. It does not
+decide whether the claim is true or false. Human review and evidence are
 required later.
 
 ## Configuration
@@ -28,7 +29,7 @@ LLM_REQUEST_BATCH_SIZE=10
 LLM_MAX_SECONDS=240
 LLM_TIME_BUFFER=10
 LLM_MAX_BODY_CHARS=12000
-LLM_MAX_TOKENS=1800
+LLM_MAX_TOKENS=3000
 LLM_REQUEST_TIMEOUT=30
 LLM_TEMPERATURE=0.0
 LLM_TOP_P=0.9
@@ -52,10 +53,13 @@ name order. Record IDs already present in `silver/claims/` are skipped, so a
 second invocation continues with new rows. `LLM_BATCH_SIZE` limits the number
 of rows processed by one invocation; `LLM_REQUEST_BATCH_SIZE` limits the
 number of rows sent in one Gemini request. The recommended values above make
-one request per invocation for ten articles. The Function writes successful
-rows when the internal time budget is reached. If Gemini is unavailable, the
-quota is exhausted, or a response does not contain one valid item per input
-row, that request's rows are not written and remain pending for a later retry.
+one request per invocation for ten articles. Eligible rows include
+`claim_text_en` and `pubmed_query_en`, so the evidence Function can query
+English PubMed abstracts without another Gemini request. The Function writes
+successful rows when the internal time budget is reached. If Gemini is
+unavailable, the quota is exhausted, or a response does not contain one valid
+item per input row, that request's rows are not written and remain pending for
+a later retry.
 HTTP 4xx, quota, rate-limit, and malformed JSON failures are not retried
 inside the same invocation, so a failed request does not consume a duplicate
 API call.
@@ -69,9 +73,28 @@ silver/claims/claims_batch_run_20261005T000000Z_ab12cd34.csv
 ```
 
 The output keeps the Bronze and body columns and adds `claim_text`,
+`claim_text_en`, `pubmed_query_en`, `query_status`, `query_prompt_version`,
 `is_medical`, `is_claim_eligible`, `claim_type`, `llm_reason`,
 `needs_human_review`, `llm_status`, `llm_error`, `llm_raw_json`, `model_id`,
-`prompt_version`, timestamps, source object/run identifiers, and `llm_provider`.
+`prompt_version`, timestamps, and source object/run identifiers.
+
+## Enriching existing claim CSVs
+
+CSV objects written before the English fields were added can be migrated
+without downloading the news or extracting bodies again:
+
+```bash
+oci fn function invoke \
+  --function-id <extract-claims-function-ocid> \
+  --file - \
+  --body '{"mode":"enrich_queries"}' \
+  --region us-ashburn-1 \
+  --read-timeout 360
+```
+
+This mode processes up to `LLM_BATCH_SIZE` existing eligible claims per call
+and writes `claims_enriched_batch_<run_id>.csv` in the same prefix. It is
+idempotent: rows whose `query_status` is already `OK` are not enriched again.
 
 ## Manual invocation
 
