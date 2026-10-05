@@ -23,16 +23,16 @@ SILVER_CLAIMS_PREFIX=silver/claims
 LLM_MODEL_ID=google.gemini-2.5-flash
 LLM_REGION=us-ashburn-1
 GENAI_COMPARTMENT_ID=<Cloud compartment OCID>
-LLM_BATCH_SIZE=5
-LLM_REQUEST_BATCH_SIZE=5
+LLM_BATCH_SIZE=10
+LLM_REQUEST_BATCH_SIZE=10
 LLM_MAX_SECONDS=240
 LLM_TIME_BUFFER=10
 LLM_MAX_BODY_CHARS=12000
-LLM_MAX_TOKENS=1200
+LLM_MAX_TOKENS=1800
 LLM_REQUEST_TIMEOUT=30
-LLM_TEMPERATURE=0.1
+LLM_TEMPERATURE=0.0
 LLM_TOP_P=0.9
-LLM_MAX_RETRIES=1
+LLM_MAX_RETRIES=0
 ```
 
 When OCI Generative AI model quota is unavailable, use the Google provider:
@@ -52,12 +52,13 @@ name order. Record IDs already present in `silver/claims/` are skipped, so a
 second invocation continues with new rows. `LLM_BATCH_SIZE` limits the number
 of rows processed by one invocation; `LLM_REQUEST_BATCH_SIZE` limits the
 number of rows sent in one Gemini request. The recommended values above make
-one request per invocation for five articles. The Function writes successful
+one request per invocation for ten articles. The Function writes successful
 rows when the internal time budget is reached. If Gemini is unavailable, the
 quota is exhausted, or a response does not contain one valid item per input
 row, that request's rows are not written and remain pending for a later retry.
-HTTP 4xx, quota, and rate-limit failures are not retried inside the same
-invocation, so a failed request does not consume a duplicate API call.
+HTTP 4xx, quota, rate-limit, and malformed JSON failures are not retried
+inside the same invocation, so a failed request does not consume a duplicate
+API call.
 
 ## Output
 

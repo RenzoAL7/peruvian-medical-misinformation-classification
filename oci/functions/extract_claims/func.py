@@ -299,7 +299,7 @@ JSON válido con esta forma exacta:
       "is_claim_eligible": true,
       "claim_text": "una sola afirmación médica concreta",
       "claim_type": "tratamiento|prevención|diagnóstico|riesgo|causa|síntoma|otro",
-      "reason": "explicación breve basada en el texto",
+      "reason": "explicación breve basada en el texto, máximo 160 caracteres",
       "needs_human_review": true
     }}
   ]
@@ -314,6 +314,7 @@ Reglas obligatorias:
 - is_medical es false si el texto no trata sobre salud, enfermedad, medicina o bienestar.
 - is_claim_eligible es false y claim_text debe ser "" si no existe una afirmación médica concreta que pueda verificarse.
 - Mantén claim_text en español y en una sola oración.
+- Mantén claim_text por debajo de 350 caracteres y reason por debajo de 160 caracteres.
 - needs_human_review debe ser true para cualquier afirmación elegible.
 
 Artículos:
@@ -619,6 +620,11 @@ def _retryable_llm_error(error: Exception) -> bool:
         "set to 0",
         "tokens-per-minute",
     )
+    permanent_markers += (
+        "jsondecodeerror",
+        "llm returned",
+        "record_id values do not match",
+    )
     return not any(marker in message for marker in permanent_markers)
 
 
@@ -660,16 +666,16 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         default_model_id = DEFAULT_GOOGLE_MODEL_ID if provider == "google" else DEFAULT_MODEL_ID
         model_id = os.getenv("LLM_MODEL_ID", default_model_id).strip() or default_model_id
         region = os.getenv("LLM_REGION", os.getenv("OCI_REGION", "us-ashburn-1")).strip()
-        batch_size = _env_int("LLM_BATCH_SIZE", 5, minimum=1)
-        request_batch_size = _env_int("LLM_REQUEST_BATCH_SIZE", 5, minimum=1)
+        batch_size = _env_int("LLM_BATCH_SIZE", 10, minimum=1)
+        request_batch_size = _env_int("LLM_REQUEST_BATCH_SIZE", 10, minimum=1)
         max_seconds = _env_float("LLM_MAX_SECONDS", 240.0, minimum=1.0)
         time_buffer = _env_float("LLM_TIME_BUFFER", 10.0, minimum=0.0)
         max_body_chars = _env_int("LLM_MAX_BODY_CHARS", 12_000, minimum=500)
-        max_tokens = _env_int("LLM_MAX_TOKENS", 600, minimum=50)
+        max_tokens = _env_int("LLM_MAX_TOKENS", 1800, minimum=50)
         request_timeout = _env_float("LLM_REQUEST_TIMEOUT", 30.0, minimum=5.0)
-        temperature = _env_float("LLM_TEMPERATURE", 0.1, minimum=0.0)
+        temperature = _env_float("LLM_TEMPERATURE", 0.0, minimum=0.0)
         top_p = _env_float("LLM_TOP_P", 0.9, minimum=0.0)
-        retries = _env_int("LLM_MAX_RETRIES", 1, minimum=0)
+        retries = _env_int("LLM_MAX_RETRIES", 0, minimum=0)
         if time_buffer >= max_seconds:
             raise RuntimeError("LLM_TIME_BUFFER must be smaller than LLM_MAX_SECONDS")
 
