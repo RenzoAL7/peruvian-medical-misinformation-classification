@@ -22,7 +22,7 @@ NEWSDATA_LANGUAGE=es
 NEWSDATA_CATEGORY=health
 NEWSDATA_SIZE=10
 NEWSDATA_MAX_PAGES=8
-NEWSDATA_TARGET_ROWS=100
+NEWSDATA_TARGET_ROWS=50
 NEWSDATA_REQUIRE_TARGET_ROWS=0
 NEWSDATA_COUNTRY_GROUP_SIZE=5
 NEWSDATA_COUNTRY_DELAY=1
@@ -31,7 +31,7 @@ NEWSDATA_MAX_RETRIES=2
 NEWSDATA_REMOVEDUPLICATE=1
 NEWSDATA_VIDEO=0
 NEWSDATA_COUNTRY_SEQUENCE=ar,bo,cl,co,cr,cu,do,ec,es,gt,gq,hn,mx,ni,pa,pe,pr,py,sv,uy,ve
-NEWSDATA_QUERY=(salud OR medicina OR médico OR enfermedad OR vacuna OR tratamiento OR fármaco OR cáncer OR diabetes)
+NEWSDATA_QUERY=(salud OR medicina OR médico OR enfermedad OR vacuna OR tratamiento OR cáncer OR diabetes)
 ```
 
 `NEWSDATA_QUERY` and `NEWSDATA_ENDPOINT` remain optional filters. The function
@@ -43,8 +43,9 @@ intentionally included as a separate territory. The order restarts at `ar` on
 the next invocation; no cursor or state JSON is needed.
 
 The default medical query includes general terms such as `salud`, `médico`,
-`medicina`, `enfermedad`, and `hospital` in addition to specific terms such as
-`cáncer`, `diabetes`, `vacuna`, and `tratamiento`.
+`medicina`, and `enfermedad` in addition to specific terms such as `cáncer`,
+`diabetes`, `vacuna`, and `tratamiento`. It stays below NewsData's 100-character
+query limit.
 
 With `BRONZE_DEDUP_ENABLED=1`, each run reads prior CSVs under `bronze/` and
 skips any `record_id` already stored there and also removes duplicates between
@@ -58,9 +59,12 @@ Each extra page is another API credit. `NEWSDATA_COUNTRY_DELAY` spaces country
 group requests, while `NEWSDATA_PAGE_DELAY` spaces pages within a country group
 and `NEWSDATA_MAX_RETRIES` retries temporary HTTP 429 responses. With
 `NEWSDATA_REQUIRE_TARGET_ROWS=0` writes the available new rows even when the
-batch has fewer than 100; set it to `1` only when an incomplete CSV must be
-rejected. The query broadens the medical vocabulary and must remain at most
-100 characters because that is the NewsData API limit.
+batch has fewer than 50; set it to `1` only when an incomplete CSV must be
+rejected. A target of 50 keeps the Bronze batch small enough for the next body
+extraction step to run within the OCI Functions timeout. The query broadens the
+medical vocabulary and must remain at most 100 characters because that is the
+NewsData API limit. Increase `NEWSDATA_TARGET_ROWS` later if measured runtime
+and API availability support larger batches.
 
 The function writes objects like:
 

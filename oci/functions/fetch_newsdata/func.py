@@ -315,7 +315,7 @@ def _request_newsdata(
     query = os.getenv(
         "NEWSDATA_QUERY",
         "(salud OR medicina OR médico OR enfermedad OR vacuna OR tratamiento "
-        "OR fármaco OR cáncer OR diabetes)",
+        "OR cáncer OR diabetes)",
     ).strip()
     if len(query) > 100:
         raise RuntimeError("NEWSDATA_QUERY cannot be longer than 100 characters")
@@ -471,7 +471,7 @@ def _collect_country_batch(
     """Collect one ordered country page at a time until the batch is full."""
 
     try:
-        target_rows = int(os.getenv("NEWSDATA_TARGET_ROWS", "100"))
+        target_rows = int(os.getenv("NEWSDATA_TARGET_ROWS", "50"))
     except ValueError as exc:
         raise RuntimeError("NEWSDATA_TARGET_ROWS must be an integer") from exc
     if target_rows < 1:
