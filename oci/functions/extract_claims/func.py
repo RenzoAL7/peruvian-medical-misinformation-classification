@@ -10,12 +10,16 @@ response is written to a new CSV under ``silver/claims/``.
 from __future__ import annotations
 
 import csv
+import base64
 import io
 import json
 import logging
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
@@ -30,6 +34,7 @@ LOGGER.setLevel(logging.INFO)
 
 PROMPT_VERSION = "claim-extraction-v1"
 DEFAULT_MODEL_ID = "google.gemini-2.5-flash"
+DEFAULT_GOOGLE_MODEL_ID = "gemini-2.5-flash"
 CLAIM_TYPES = {"tratamiento", "prevención", "diagnóstico", "riesgo", "causa", "síntoma", "otro"}
 
 BRONZE_FIELDS = [
@@ -123,6 +128,31 @@ def _generative_ai_client(region: str, request_timeout: float) -> Any:
         timeout=(5.0, request_timeout),
         retry_strategy=oci.retry.NoneRetryStrategy(),
     )
+
+
+def _vault_secret_value(secret_id: str) -> str:
+    """Read and decode a current OCI Vault secret using the Function identity."""
+
+    signer = oci.auth.signers.get_resource_principals_signer()
+    client = oci.secrets.SecretsClient(config={}, signer=signer)
+    bundle = client.get_secret_bundle(secret_id=secret_id, stage="CURRENT").data
+    content = bundle.secret_bundle_content.content
+    if not content:
+        raise RuntimeError("The configured Vault secret has no content")
+    if isinstance(content, bytes):
+        encoded = content.decode("ascii")
+    else:
+        encoded = str(content)
+    try:
+        value = base64.b64decode(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        # Keep local/dev compatibility with a plain-text secret if the service
+        # returns it without Base64 wrapping.
+        value = encoded
+    value = value.strip()
+    if not value:
+        raise RuntimeError("The configured Vault secret is empty")
+    return value
 
 
 def _list_csv_objects(client: Any, namespace: str, bucket: str, prefix: str) -> list[str]:
@@ -299,7 +329,17 @@ def _find_response_text(value: Any) -> str:
         return ""
     if not isinstance(value, dict):
         return ""
-    for key in ("text", "content", "chat_response", "choices", "message", "response", "data"):
+    for key in (
+        "text",
+        "content",
+        "chat_response",
+        "choices",
+        "candidates",
+        "parts",
+        "message",
+        "response",
+        "data",
+    ):
         if key in value:
             text = _find_response_text(value[key])
             if text:
@@ -374,6 +414,55 @@ def _chat_request(model_id: str, prompt: str, max_tokens: int, temperature: floa
     )
 
 
+def _google_gemini_request(
+    api_key: str,
+    model_id: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    request_timeout: float,
+) -> Any:
+    """Call the public Gemini API without placing the API key in the payload."""
+
+    base_url = os.getenv(
+        "GOOGLE_GEMINI_ENDPOINT",
+        "https://generativelanguage.googleapis.com/v1beta",
+    ).strip().rstrip("/")
+    encoded_model = urllib.parse.quote(model_id, safe="")
+    url = f"{base_url}/models/{encoded_model}:generateContent"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "topP": top_p,
+            "maxOutputTokens": max_tokens,
+            "responseMimeType": "application/json",
+        },
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=request_timeout) as result:
+            content = result.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Gemini network error: {exc.reason}") from exc
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Gemini returned invalid JSON") from exc
+
+
 def _call_llm(
     client: Any,
     row: dict[str, str],
@@ -384,6 +473,9 @@ def _call_llm(
     top_p: float,
     retries: int,
     deadline: float,
+    provider: str = "oci",
+    google_api_key: str = "",
+    request_timeout: float = 30.0,
 ) -> tuple[dict[str, str], str]:
     prompt = _build_prompt(row, max_body_chars)
     last_error: Exception | None = None
@@ -391,13 +483,24 @@ def _call_llm(
         if time.monotonic() >= deadline:
             raise TimeoutError("LLM batch time budget reached")
         try:
-            result = client.chat(
-                chat_details=_chat_request(model_id, prompt, max_tokens, temperature, top_p),
-                retry_strategy=oci.retry.NoneRetryStrategy(),
-            )
+            if provider == "google":
+                result = _google_gemini_request(
+                    google_api_key,
+                    model_id,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    request_timeout,
+                )
+            else:
+                result = client.chat(
+                    chat_details=_chat_request(model_id, prompt, max_tokens, temperature, top_p),
+                    retry_strategy=oci.retry.NoneRetryStrategy(),
+                )
             raw_text = _find_response_text(result)
             if not raw_text:
-                raise ValueError("OCI Generative AI returned an empty response")
+                raise ValueError(f"{provider} returned an empty response")
             payload = _json_payload(raw_text)
             return _normalize_claim(payload), json.dumps(payload, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001 - retry transient service/parse errors once
@@ -470,7 +573,11 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         bucket = _required_env("OBJECT_STORAGE_BUCKET")
         body_prefix = os.getenv("SILVER_BODY_PREFIX", "silver/body").strip("/")
         claims_prefix = os.getenv("SILVER_CLAIMS_PREFIX", "silver/claims").strip("/")
-        model_id = os.getenv("LLM_MODEL_ID", DEFAULT_MODEL_ID).strip() or DEFAULT_MODEL_ID
+        provider = os.getenv("LLM_PROVIDER", "oci").strip().lower() or "oci"
+        if provider not in {"oci", "google"}:
+            raise RuntimeError("LLM_PROVIDER must be either 'oci' or 'google'")
+        default_model_id = DEFAULT_GOOGLE_MODEL_ID if provider == "google" else DEFAULT_MODEL_ID
+        model_id = os.getenv("LLM_MODEL_ID", default_model_id).strip() or default_model_id
         region = os.getenv("LLM_REGION", os.getenv("OCI_REGION", "us-ashburn-1")).strip()
         batch_size = _env_int("LLM_BATCH_SIZE", 10, minimum=1)
         max_seconds = _env_float("LLM_MAX_SECONDS", 240.0, minimum=1.0)
@@ -498,8 +605,14 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         statuses: Counter[str] = Counter()
         last_llm_error = ""
         consecutive_errors = 0
+        google_api_key = ""
         if pending:
-            llm = _generative_ai_client(region, request_timeout)
+            if provider == "google":
+                secret_id = _required_env("GOOGLE_GEMINI_SECRET_OCID")
+                google_api_key = _vault_secret_value(secret_id)
+                llm = None
+            else:
+                llm = _generative_ai_client(region, request_timeout)
             for source_row in pending:
                 if time.monotonic() >= deadline:
                     break
@@ -514,6 +627,9 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                         top_p,
                         retries,
                         deadline,
+                        provider=provider,
+                        google_api_key=google_api_key,
+                        request_timeout=request_timeout,
                     )
                     output_rows.append(
                         _output_row(source_row, claim, raw_json, run_id, model_id, "OK")
@@ -552,6 +668,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
             "llm_error": last_llm_error,
             "model_id": model_id,
+            "llm_provider": provider,
             "elapsed_seconds": f"{time.monotonic() - started:.2f}",
             "batch_size": str(batch_size),
             "scan": scan_meta,
