@@ -34,7 +34,7 @@ LOGGER.setLevel(logging.INFO)
 
 PROMPT_VERSION = "claim-extraction-v1"
 DEFAULT_MODEL_ID = "google.gemini-2.5-flash"
-DEFAULT_GOOGLE_MODEL_ID = "gemini-2.5-flash"
+DEFAULT_GOOGLE_MODEL_ID = "gemini-3.8-flash"
 CLAIM_TYPES = {"tratamiento", "prevención", "diagnóstico", "riesgo", "causa", "síntoma", "otro"}
 
 BRONZE_FIELDS = [

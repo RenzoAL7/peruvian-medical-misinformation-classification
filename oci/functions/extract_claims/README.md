@@ -35,7 +35,7 @@ When OCI Generative AI model quota is unavailable, use the Google provider:
 
 ```text
 LLM_PROVIDER=google
-LLM_MODEL_ID=gemini-2.5-flash
+LLM_MODEL_ID=gemini-3.8-flash
 GOOGLE_GEMINI_SECRET_OCID=<OCI Vault secret OCID>
 ```
 
