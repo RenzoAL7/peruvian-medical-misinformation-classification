@@ -125,9 +125,9 @@ La opción `EXISTING` debe apuntar a un Excel o CSV con una columna `record_id`.
 ## Límites metodológicos
 
 - NewsData y los archivos periodísticos son mecanismos de descubrimiento, no autoridades médicas.
-- `api_query` conserva el tema o archivo que permitió descubrir la candidata.
-- La persona investigadora decide `is_medical` e `is_claim_eligible`.
-- La afirmación, evidencia, etiqueta y elegibilidad final se completan y validan en `Silver`.
-- `Gold` contiene únicamente registros con extracción correcta, evidencia completa, etiqueta `RESPALDADA` o `REFUTADA`, validación completada y elegibilidad final aprobada.
-- La fuente periodística, la URL, la fecha y el autor se conservan para auditoría, no para predecir la etiqueta.
+- `topic` conserva el tema o archivo que permitió descubrir la candidata.
+- En `Bronze`, `selection_status` resume la decisión de incluir o excluir y su motivo principal.
+- La afirmación, URL de evidencia, nota de verificación y etiqueta se completan y validan en `Silver`.
+- `Gold` contiene únicamente registros con cuerpo, afirmación, evidencia, etiqueta `RESPALDADA` o `REFUTADA` y validación completada.
+- Para entrenar, la entrada será `title + body` y el objetivo será `label`; `source_name` y `topic` se conservan solo para análisis y auditoría.
 - El historial de fuentes aceptadas y descartadas está documentado en `docs/source_audit.md`.
