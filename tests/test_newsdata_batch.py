@@ -397,10 +397,10 @@ def test_read_record_ids_from_excel_bronze_sheet(tmp_path) -> None:
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Bronze"
-    worksheet.append(["run_id", "record_id", "title"])
-    worksheet.append(["run_1", "abc", "Uno"])
-    worksheet.append(["run_2", "abc", "Duplicada"])
-    worksheet.append(["run_3", "def", "Dos"])
+    worksheet.append(["record_id", "source_name", "title", "selection_status"])
+    worksheet.append(["abc", "Medio A", "Uno", "PENDIENTE"])
+    worksheet.append(["abc", "Medio A", "Duplicada", "PENDIENTE"])
+    worksheet.append(["def", "Medio B", "Dos", "INCLUIR"])
     workbook.save(exported)
 
     assert read_record_ids(exported) == {"abc", "def"}
