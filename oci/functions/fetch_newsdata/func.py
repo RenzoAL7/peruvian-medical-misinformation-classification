@@ -314,8 +314,8 @@ def _request_newsdata(
     }
     query = os.getenv(
         "NEWSDATA_QUERY",
-        "(salud OR médico OR enfermedad OR hospital OR vacuna OR cáncer "
-        "OR diabetes OR tratamiento)",
+        "(salud OR medicina OR médico OR enfermedad OR vacuna OR tratamiento "
+        "OR fármaco OR cáncer OR diabetes)",
     ).strip()
     if len(query) > 100:
         raise RuntimeError("NEWSDATA_QUERY cannot be longer than 100 characters")
@@ -395,6 +395,12 @@ def _request_newsdata(
             raise RuntimeError("NewsData returned a non-JSON response") from exc
         if not isinstance(page_payload, dict):
             raise RuntimeError("NewsData returned an unexpected JSON shape")
+        api_status = str(page_payload.get("status") or "").strip().lower()
+        if api_status in {"error", "failed"}:
+            details = page_payload.get("results") or page_payload.get("message")
+            if isinstance(details, dict):
+                details = details.get("message") or details.get("error") or details
+            raise RuntimeError(f"NewsData API error: {str(details)[:500]}")
         if first_payload is None:
             first_payload = page_payload
 
@@ -421,6 +427,8 @@ def _request_newsdata(
             "next_page_available": str(bool(next_page)).lower(),
             "page_delay_seconds": str(page_delay),
             "max_retries": str(max_retries),
+            "api_status": str((first_payload or {}).get("status") or ""),
+            "total_results": str((first_payload or {}).get("totalResults") or ""),
         }
     )
     return payload, safe_params
@@ -640,10 +648,19 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "NEWSDATA_REQUIRE_TARGET_ROWS", "0"
         ).strip().lower() in {"1", "true", "yes"}
         if require_target and len(rows) < int(request_meta["target_rows"]):
+            summary = {
+                "new_rows": len(rows),
+                "target_rows": request_meta["target_rows"],
+                "requests_made": request_meta["requests_made"],
+                "candidate_rows": request_meta["candidate_rows"],
+                "duplicates_skipped": request_meta["duplicates_skipped"],
+                "key_slots_configured": request_meta["key_slots_configured"],
+            }
             raise RuntimeError(
                 "NewsData returned only "
                 f"{len(rows)} new unique rows; target is {request_meta['target_rows']}. "
-                "No incomplete Bronze CSV was written."
+                "No incomplete Bronze CSV was written. Details: "
+                f"{json.dumps(summary, ensure_ascii=False)}"
             )
         result = _write_bronze(rows, request_meta, client)
         LOGGER.info("Bronze CSV written: %s (%s rows)", result["object_name"], result["row_count"])

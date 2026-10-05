@@ -23,7 +23,7 @@ NEWSDATA_CATEGORY=health
 NEWSDATA_SIZE=10
 NEWSDATA_MAX_PAGES=8
 NEWSDATA_TARGET_ROWS=100
-NEWSDATA_REQUIRE_TARGET_ROWS=1
+NEWSDATA_REQUIRE_TARGET_ROWS=0
 NEWSDATA_COUNTRY_GROUP_SIZE=5
 NEWSDATA_COUNTRY_DELAY=1
 NEWSDATA_PAGE_DELAY=1
@@ -31,7 +31,7 @@ NEWSDATA_MAX_RETRIES=2
 NEWSDATA_REMOVEDUPLICATE=1
 NEWSDATA_VIDEO=0
 NEWSDATA_COUNTRY_SEQUENCE=ar,bo,cl,co,cr,cu,do,ec,es,gt,gq,hn,mx,ni,pa,pe,pr,py,sv,uy,ve
-NEWSDATA_QUERY=(salud OR médico OR enfermedad OR hospital OR vacuna OR cáncer OR diabetes OR tratamiento)
+NEWSDATA_QUERY=(salud OR medicina OR médico OR enfermedad OR vacuna OR tratamiento OR fármaco OR cáncer OR diabetes)
 ```
 
 `NEWSDATA_QUERY` and `NEWSDATA_ENDPOINT` remain optional filters. The function
@@ -57,9 +57,10 @@ keys in round-robin order and fail over to another key if a request fails.
 Each extra page is another API credit. `NEWSDATA_COUNTRY_DELAY` spaces country
 group requests, while `NEWSDATA_PAGE_DELAY` spaces pages within a country group
 and `NEWSDATA_MAX_RETRIES` retries temporary HTTP 429 responses. With
-`NEWSDATA_REQUIRE_TARGET_ROWS=1`, an invocation fails without writing an
-incomplete CSV when fewer than 100 new unique rows are available. The query
-must remain at most 100 characters because that is the NewsData API limit.
+`NEWSDATA_REQUIRE_TARGET_ROWS=0` writes the available new rows even when the
+batch has fewer than 100; set it to `1` only when an incomplete CSV must be
+rejected. The query broadens the medical vocabulary and must remain at most
+100 characters because that is the NewsData API limit.
 
 The function writes objects like:
 
