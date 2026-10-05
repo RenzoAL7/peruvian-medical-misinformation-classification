@@ -1,0 +1,509 @@
+"""Extract article bodies from pending Bronze rows into the Silver layer.
+
+The function treats 50 as a maximum number of rows per invocation, not as a
+file boundary. It walks Bronze CSVs in lexical (run-time) order, skips
+record_ids already present in Silver, and fills the batch from the next CSV
+when the current one contains fewer pending rows. A time budget stops the
+invocation early so a slow publisher cannot consume the OCI Functions limit;
+all rows attempted before that deadline are still written to Silver.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import logging
+import os
+import re
+import time
+import uuid
+from collections import Counter
+from datetime import datetime, timezone
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
+
+import oci
+from bs4 import BeautifulSoup
+from fdk import response
+
+
+LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
+
+
+BRONZE_FIELDS = [
+    "record_id",
+    "source_name",
+    "canonical_url",
+    "published_at",
+    "title",
+    "subtitle_or_bajada",
+    "topic",
+    "selection_status",
+    "retrieved_at",
+    "country",
+]
+
+SILVER_FIELDS = BRONZE_FIELDS + [
+    "body",
+    "http_status",
+    "extraction_method",
+    "extraction_status",
+    "body_char_count",
+    "body_word_count",
+    "extracted_at",
+    "source_bronze_object",
+    "extraction_run_id",
+    "extraction_error",
+]
+
+RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+DEFAULT_BODY_SELECTORS = (
+    "[itemprop='articleBody']",
+    "article",
+    ".article-body",
+    ".article__body",
+    ".article-content",
+    ".story-body",
+    ".entry-content",
+    ".post-content",
+    "main",
+)
+
+
+def _required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def _env_int(name: str, default: int, minimum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if minimum is not None and value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if minimum is not None and value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _object_storage_client() -> Any:
+    signer = oci.auth.signers.get_resource_principals_signer()
+    return oci.object_storage.ObjectStorageClient(config={}, signer=signer)
+
+
+def _list_csv_objects(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    prefix: str,
+) -> list[str]:
+    """List CSV objects in a prefix and return them in deterministic order."""
+
+    list_prefix = f"{prefix.strip('/')}/" if prefix.strip('/') else ""
+    names: list[str] = []
+    start: str | None = None
+    while True:
+        result = client.list_objects(
+            namespace_name=namespace,
+            bucket_name=bucket,
+            prefix=list_prefix,
+            start=start,
+            fields="name",
+            limit=1000,
+        )
+        for item in result.data.objects:
+            name = str(item.name)
+            if name.endswith(".csv"):
+                names.append(name)
+        start = result.data.next_start_with
+        if not start:
+            break
+    return sorted(set(names))
+
+
+def _read_csv_object(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    object_name: str,
+) -> list[dict[str, str]]:
+    result = client.get_object(
+        namespace_name=namespace,
+        bucket_name=bucket,
+        object_name=object_name,
+    )
+    content = result.data.content
+    if hasattr(content, "read"):
+        content = content.read()
+    if not isinstance(content, (bytes, bytearray)):
+        raise RuntimeError(f"Object Storage returned non-byte content for {object_name}")
+    reader = csv.DictReader(io.StringIO(bytes(content).decode("utf-8-sig", errors="replace")))
+    return [
+        {str(key): str(value or "").strip() for key, value in row.items() if key}
+        for row in reader
+        if row
+    ]
+
+
+def _existing_silver_ids(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    prefix: str,
+) -> set[str]:
+    """Return record_ids already attempted in Silver.
+
+    Every attempted row is retained, including an extraction error. This
+    prevents repeated runs from hammering a publisher. A future retry mode can
+    explicitly select error rows without changing the default behavior.
+    """
+
+    record_ids: set[str] = set()
+    for object_name in _list_csv_objects(client, namespace, bucket, prefix):
+        for row in _read_csv_object(client, namespace, bucket, object_name):
+            record_id = row.get("record_id", "").strip()
+            if record_id:
+                record_ids.add(record_id)
+    return record_ids
+
+
+def _pending_rows(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    bronze_prefix: str,
+    silver_prefix: str,
+    batch_size: int,
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Collect pending rows across Bronze files until the batch is full."""
+
+    processed_ids = _existing_silver_ids(client, namespace, bucket, silver_prefix)
+    selected_ids: set[str] = set()
+    selected: list[dict[str, str]] = []
+    rows_seen = 0
+    skipped_existing = 0
+    bronze_objects = _list_csv_objects(client, namespace, bucket, bronze_prefix)
+
+    for object_name in bronze_objects:
+        for source_row in _read_csv_object(client, namespace, bucket, object_name):
+            rows_seen += 1
+            record_id = source_row.get("record_id", "").strip()
+            canonical_url = source_row.get("canonical_url", "").strip()
+            if not record_id or not canonical_url:
+                continue
+            if record_id in processed_ids or record_id in selected_ids:
+                skipped_existing += 1
+                continue
+            selected_ids.add(record_id)
+            selected.append(
+                {
+                    field: source_row.get(field, "").strip()
+                    for field in BRONZE_FIELDS
+                }
+                | {"source_bronze_object": object_name}
+            )
+            if len(selected) >= batch_size:
+                return selected, {
+                    "bronze_objects_scanned": len(bronze_objects),
+                    "bronze_rows_seen": rows_seen,
+                    "skipped_existing": skipped_existing,
+                    "silver_record_ids": len(processed_ids),
+                }
+
+    return selected, {
+        "bronze_objects_scanned": len(bronze_objects),
+        "bronze_rows_seen": rows_seen,
+        "skipped_existing": skipped_existing,
+        "silver_record_ids": len(processed_ids),
+    }
+
+
+def _decode_html(raw: bytes, content_type: str) -> str:
+    charset_match = re.search(r"charset\s*=\s*['\"]?([\w.-]+)", content_type, re.I)
+    encoding = charset_match.group(1) if charset_match else "utf-8"
+    try:
+        return raw.decode(encoding, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _extract_body_text(html: str) -> tuple[str, str]:
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(
+        ["script", "style", "noscript", "template", "svg", "canvas", "nav", "header", "footer", "aside", "form"]
+    ):
+        tag.decompose()
+
+    candidates: list[str] = []
+    for selector in DEFAULT_BODY_SELECTORS:
+        for node in soup.select(selector):
+            text = _normalize_text(node.get_text(" ", strip=True))
+            if text:
+                candidates.append(text)
+    if not candidates:
+        root = soup.body or soup
+        fallback = _normalize_text(root.get_text(" ", strip=True))
+        if fallback:
+            candidates.append(fallback)
+    if not candidates:
+        return "", "none"
+    return max(candidates, key=len), "beautifulsoup"
+
+
+def _download_html(
+    url: str,
+    timeout: float,
+    max_bytes: int,
+    max_retries: int,
+    user_agent: str,
+) -> tuple[bytes, int, str]:
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("URL must use http or https")
+
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        request = Request(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "es-419,es;q=0.9,en;q=0.5",
+                "User-Agent": user_agent,
+            },
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=timeout) as result:
+                raw = result.read(max_bytes + 1)
+                return raw[:max_bytes], int(result.status or 200), str(
+                    result.headers.get("Content-Type", "")
+                )
+        except HTTPError as exc:
+            last_error = exc
+            if exc.code not in RETRYABLE_HTTP_STATUS or attempt >= max_retries:
+                raise
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt >= max_retries:
+                raise
+        time.sleep(min(2.0 ** attempt, 4.0))
+    raise RuntimeError(str(last_error or "body download failed"))
+
+
+def _extract_row(
+    source_row: dict[str, str],
+    run_id: str,
+    deadline: float,
+    request_timeout: float,
+    max_bytes: int,
+    max_retries: int,
+    min_words: int,
+    min_chars: int,
+    max_text_chars: int,
+    user_agent: str,
+) -> dict[str, str]:
+    extracted_at = datetime.now(timezone.utc).isoformat()
+    output = {field: source_row.get(field, "") for field in BRONZE_FIELDS}
+    output.update(
+        {
+            "body": "",
+            "http_status": "",
+            "extraction_method": "none",
+            "extraction_status": "ERROR",
+            "body_char_count": "0",
+            "body_word_count": "0",
+            "extracted_at": extracted_at,
+            "source_bronze_object": source_row.get("source_bronze_object", ""),
+            "extraction_run_id": run_id,
+            "extraction_error": "",
+        }
+    )
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("body batch time budget reached")
+        body_bytes, http_status, content_type = _download_html(
+            source_row["canonical_url"],
+            timeout=max(1.0, min(request_timeout, max(1.0, deadline - time.monotonic()))),
+            max_bytes=max_bytes,
+            max_retries=max_retries,
+            user_agent=user_agent,
+        )
+        html = _decode_html(body_bytes, content_type)
+        body, extraction_method = _extract_body_text(html)
+        body = body[:max_text_chars]
+        word_count = len(re.findall(r"\b[\wÀ-ÿ]+\b", body, flags=re.UNICODE))
+        char_count = len(body)
+        output.update(
+            {
+                "body": body,
+                "http_status": str(http_status),
+                "extraction_method": extraction_method,
+                "body_char_count": str(char_count),
+                "body_word_count": str(word_count),
+                "extraction_status": (
+                    "OK" if word_count >= min_words and char_count >= min_chars else "CUERPO_INSUFICIENTE"
+                ),
+            }
+        )
+    except HTTPError as exc:
+        output.update(
+            {
+                "http_status": str(exc.code),
+                "extraction_status": "HTTP_ERROR",
+                "extraction_error": f"HTTP {exc.code}",
+            }
+        )
+    except TimeoutError as exc:
+        output["extraction_error"] = str(exc)[:500]
+        output["extraction_status"] = "TIMEOUT"
+    except ValueError as exc:
+        output["extraction_error"] = str(exc)[:500]
+        output["extraction_status"] = "URL_ERROR"
+    except (URLError, OSError) as exc:
+        output["extraction_error"] = str(exc)[:500]
+        output["extraction_status"] = "URL_ERROR"
+    except Exception as exc:  # noqa: BLE001 - preserve one row even if a parser fails
+        LOGGER.warning("Body extraction failed for %s: %s", source_row.get("record_id"), type(exc).__name__)
+        output["extraction_error"] = f"{type(exc).__name__}: {str(exc)[:450]}"
+    return output
+
+
+def _write_silver(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    prefix: str,
+    rows: list[dict[str, str]],
+    run_id: str,
+) -> str:
+    csv_buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(csv_buffer, fieldnames=SILVER_FIELDS, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    object_name = f"{prefix.strip('/')}/body_batch_{run_id}.csv"
+    client.put_object(
+        namespace_name=namespace,
+        bucket_name=bucket,
+        object_name=object_name,
+        put_object_body=io.BytesIO(csv_buffer.getvalue().encode("utf-8-sig")),
+        content_type="text/csv; charset=utf-8",
+    )
+    return object_name
+
+
+def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
+    """Process up to one body batch and write the attempted rows to Silver."""
+
+    started = time.monotonic()
+    now = datetime.now(timezone.utc)
+    run_id = f"run_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
+    try:
+        namespace = _required_env("OBJECT_STORAGE_NAMESPACE")
+        bucket = _required_env("OBJECT_STORAGE_BUCKET")
+        bronze_prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
+        silver_prefix = os.getenv("SILVER_PREFIX", "silver").strip("/")
+        batch_size = _env_int("BODY_BATCH_SIZE", 50, minimum=1)
+        max_seconds = _env_float("BODY_MAX_SECONDS", 240.0, minimum=1.0)
+        time_buffer = _env_float("BODY_TIME_BUFFER", 10.0, minimum=0.0)
+        request_timeout = _env_float("BODY_REQUEST_TIMEOUT", 15.0, minimum=1.0)
+        max_bytes = _env_int("BODY_MAX_BYTES", 1_500_000, minimum=10_000)
+        max_retries = _env_int("BODY_MAX_RETRIES", 1, minimum=0)
+        min_words = _env_int("BODY_MIN_WORDS", 150, minimum=1)
+        min_chars = _env_int("BODY_MIN_CHARS", 800, minimum=1)
+        max_text_chars = _env_int("BODY_MAX_TEXT_CHARS", 200_000, minimum=1_000)
+        user_agent = os.getenv(
+            "BODY_USER_AGENT",
+            "mednews-oci-body/0.1 (+research; contact=thesis-pipeline)",
+        ).strip()
+        if time_buffer >= max_seconds:
+            raise RuntimeError("BODY_TIME_BUFFER must be smaller than BODY_MAX_SECONDS")
+
+        client = _object_storage_client()
+        pending, scan_meta = _pending_rows(
+            client,
+            namespace,
+            bucket,
+            bronze_prefix,
+            silver_prefix,
+            batch_size,
+        )
+        deadline = started + max_seconds - time_buffer
+        output_rows: list[dict[str, str]] = []
+        for source_row in pending:
+            if time.monotonic() >= deadline:
+                break
+            output_rows.append(
+                _extract_row(
+                    source_row,
+                    run_id,
+                    deadline,
+                    request_timeout,
+                    max_bytes,
+                    max_retries,
+                    min_words,
+                    min_chars,
+                    max_text_chars,
+                    user_agent,
+                )
+            )
+
+        object_name = ""
+        if output_rows:
+            object_name = _write_silver(
+                client,
+                namespace,
+                bucket,
+                silver_prefix,
+                output_rows,
+                run_id,
+            )
+        statuses = Counter(row["extraction_status"] for row in output_rows)
+        result = {
+            "status": "ok",
+            "run_id": run_id,
+            "bucket": bucket,
+            "object_name": object_name,
+            "row_count": str(len(output_rows)),
+            "selected_pending_rows": str(len(pending)),
+            "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
+            "ok_rows": str(statuses.get("OK", 0)),
+            "insufficient_rows": str(statuses.get("CUERPO_INSUFICIENTE", 0)),
+            "error_rows": str(sum(value for key, value in statuses.items() if key not in {"OK", "CUERPO_INSUFICIENTE"})),
+            "elapsed_seconds": f"{time.monotonic() - started:.2f}",
+            "batch_size": str(batch_size),
+            "max_seconds": str(max_seconds),
+            "scan": scan_meta,
+        }
+        LOGGER.info("Silver body batch written: %s (%s rows)", object_name or "none", len(output_rows))
+        return response.Response(
+            ctx,
+            response_data=json.dumps(result, ensure_ascii=False),
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception as exc:  # noqa: BLE001 - return a useful invocation error
+        LOGGER.exception("extract-news-body failed")
+        return response.Response(
+            ctx,
+            response_data=json.dumps({"status": "error", "run_id": run_id, "message": str(exc)}),
+            status_code=500,
+            headers={"Content-Type": "application/json"},
+        )
