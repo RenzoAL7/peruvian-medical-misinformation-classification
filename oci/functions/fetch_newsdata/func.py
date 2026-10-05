@@ -112,6 +112,45 @@ def _secret_value(secret_id: str) -> str:
     return base64.b64decode(content).decode("utf-8").strip()
 
 
+def _secret_ids() -> list[str]:
+    """Read one or more Vault secret OCIDs without exposing their values."""
+
+    configured = os.getenv("NEWSDATA_SECRET_OCIDS", "").strip()
+    if configured:
+        values = [value.strip() for value in configured.split(",") if value.strip()]
+    else:
+        values = [_required_env("NEWSDATA_SECRET_OCID")]
+    unique_values = list(dict.fromkeys(values))
+    if not unique_values:
+        raise RuntimeError("At least one NewsData Vault secret OCID is required")
+    return unique_values
+
+
+def _newsdata_api_keys() -> list[str]:
+    """Load all usable NewsData keys, allowing one secret to fail over to another."""
+
+    keys: list[str] = []
+    for slot, secret_id in enumerate(_secret_ids(), start=1):
+        try:
+            value = _secret_value(secret_id)
+        except Exception as exc:  # noqa: BLE001 - keep another key available
+            LOGGER.warning(
+                "Unable to read NewsData secret slot %s: %s",
+                slot,
+                type(exc).__name__,
+            )
+            continue
+        if not value:
+            LOGGER.warning("NewsData secret slot %s is empty", slot)
+            continue
+        if value not in keys:
+            keys.append(value)
+    if not keys:
+        raise RuntimeError("No usable NewsData Vault secret was found")
+    LOGGER.info("Loaded %s NewsData key slot(s)", len(keys))
+    return keys
+
+
 def _canonicalize_url(raw_url: str) -> str:
     """Remove tracking parameters so the same article gets one record_id."""
 
@@ -275,9 +314,11 @@ def _request_newsdata(
     }
     query = os.getenv(
         "NEWSDATA_QUERY",
-        "(salud OR médico OR enfermedad OR hospital OR vacuna OR medicamento "
+        "(salud OR medicina OR médico OR enfermedad OR vacuna OR tratamiento "
         "OR cáncer OR diabetes)",
     ).strip()
+    if len(query) > 100:
+        raise RuntimeError("NEWSDATA_QUERY cannot be longer than 100 characters")
     country = (
         requested_country.strip().lower()
         if requested_country is not None
@@ -354,6 +395,12 @@ def _request_newsdata(
             raise RuntimeError("NewsData returned a non-JSON response") from exc
         if not isinstance(page_payload, dict):
             raise RuntimeError("NewsData returned an unexpected JSON shape")
+        api_status = str(page_payload.get("status") or "").strip().lower()
+        if api_status in {"error", "failed"}:
+            details = page_payload.get("results") or page_payload.get("message")
+            if isinstance(details, dict):
+                details = details.get("message") or details.get("error") or details
+            raise RuntimeError(f"NewsData API error: {str(details)[:500]}")
         if first_payload is None:
             first_payload = page_payload
 
@@ -380,13 +427,42 @@ def _request_newsdata(
             "next_page_available": str(bool(next_page)).lower(),
             "page_delay_seconds": str(page_delay),
             "max_retries": str(max_retries),
+            "api_status": str((first_payload or {}).get("status") or ""),
+            "total_results": str((first_payload or {}).get("totalResults") or ""),
         }
     )
     return payload, safe_params
 
 
+def _request_newsdata_with_failover(
+    api_keys: list[str],
+    requested_country: str,
+    key_start_index: int,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Try the assigned key first, then fail over to another configured key."""
+
+    errors: list[str] = []
+    for offset in range(len(api_keys)):
+        key_slot = (key_start_index + offset) % len(api_keys)
+        try:
+            payload, request_meta = _request_newsdata(
+                api_keys[key_slot],
+                requested_country=requested_country,
+            )
+        except RuntimeError as exc:
+            errors.append(f"slot {key_slot + 1}: {str(exc)[:240]}")
+            LOGGER.warning(
+                "NewsData request failed with key slot %s; trying failover",
+                key_slot + 1,
+            )
+            continue
+        request_meta["key_slot"] = str(key_slot + 1)
+        return payload, request_meta
+    raise RuntimeError("All NewsData key slots failed: " + " | ".join(errors))
+
+
 def _collect_country_batch(
-    api_key: str,
+    api_keys: list[str],
     client: Any,
     namespace: str,
     bucket: str,
@@ -395,7 +471,7 @@ def _collect_country_batch(
     """Collect one ordered country page at a time until the batch is full."""
 
     try:
-        target_rows = int(os.getenv("NEWSDATA_TARGET_ROWS", "100"))
+        target_rows = int(os.getenv("NEWSDATA_TARGET_ROWS", "50"))
     except ValueError as exc:
         raise RuntimeError("NEWSDATA_TARGET_ROWS must be an integer") from exc
     if target_rows < 1:
@@ -440,9 +516,10 @@ def _collect_country_batch(
             break
 
         requested_country = ",".join(country_group)
-        payload, request_meta = _request_newsdata(
-            api_key,
+        payload, request_meta = _request_newsdata_with_failover(
+            api_keys,
             requested_country=requested_country,
+            key_start_index=group_index % len(api_keys),
         )
         candidates = _bronze_rows(payload, retrieved_at)
         country_candidates = len(candidates)
@@ -491,6 +568,14 @@ def _collect_country_batch(
         "countries_configured": countries,
         "countries_attempted": countries_attempted,
         "groups_attempted": len(country_stats),
+        "key_slots_configured": len(api_keys),
+        "key_slots_used": sorted(
+            {
+                item["request"].get("key_slot", "")
+                for item in country_stats
+                if item["request"].get("key_slot")
+            }
+        ),
         "requests_made": sum(
             int(item["request"].get("pages_fetched", "0")) for item in country_stats
         ),
@@ -547,21 +632,36 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
     """Fetch ordered country pages and write one deduplicated Bronze CSV."""
 
     try:
-        secret_id = _required_env("NEWSDATA_SECRET_OCID")
-        api_key = _secret_value(secret_id)
-        if not api_key:
-            raise RuntimeError("The NewsData secret is empty")
+        api_keys = _newsdata_api_keys()
         namespace = _required_env("OBJECT_STORAGE_NAMESPACE")
         bucket = _required_env("OBJECT_STORAGE_BUCKET")
         prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
         client = _object_storage_client()
         rows, request_meta = _collect_country_batch(
-            api_key,
+            api_keys,
             client,
             namespace,
             bucket,
             prefix,
         )
+        require_target = os.getenv(
+            "NEWSDATA_REQUIRE_TARGET_ROWS", "0"
+        ).strip().lower() in {"1", "true", "yes"}
+        if require_target and len(rows) < int(request_meta["target_rows"]):
+            summary = {
+                "new_rows": len(rows),
+                "target_rows": request_meta["target_rows"],
+                "requests_made": request_meta["requests_made"],
+                "candidate_rows": request_meta["candidate_rows"],
+                "duplicates_skipped": request_meta["duplicates_skipped"],
+                "key_slots_configured": request_meta["key_slots_configured"],
+            }
+            raise RuntimeError(
+                "NewsData returned only "
+                f"{len(rows)} new unique rows; target is {request_meta['target_rows']}. "
+                "No incomplete Bronze CSV was written. Details: "
+                f"{json.dumps(summary, ensure_ascii=False)}"
+            )
         result = _write_bronze(rows, request_meta, client)
         LOGGER.info("Bronze CSV written: %s (%s rows)", result["object_name"], result["row_count"])
         return response.Response(
