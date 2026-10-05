@@ -2,9 +2,9 @@
 
 This Function is deliberately a candidate-generation step.  It does not decide
 whether a claim is true or false.  Rows whose body extraction failed, is too
-short, or is missing are excluded before the OCI Generative AI call.  Valid
-rows are sent one at a time to ``google.gemini-2.5-flash`` and the structured
-response is written to a new CSV under ``silver/claims/``.
+short, or is missing are excluded before the LLM call.  Several valid rows are
+sent in one Gemini request to reduce API calls and rate-limit pressure.  The
+structured response is written to a new CSV under ``silver/claims/``.
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ from fdk import response
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
 
-PROMPT_VERSION = "claim-extraction-v1"
+PROMPT_VERSION = "claim-extraction-v2-batched"
 DEFAULT_MODEL_ID = "google.gemini-2.5-flash"
-DEFAULT_GOOGLE_MODEL_ID = "gemini-3.8-flash"
+DEFAULT_GOOGLE_MODEL_ID = "gemini-3.5-flash-lite"
 CLAIM_TYPES = {"tratamiento", "prevención", "diagnóstico", "riesgo", "causa", "síntoma", "otro"}
 
 BRONZE_FIELDS = [
@@ -262,36 +262,62 @@ def _pending_rows(
     return selected, dict(stats)
 
 
-def _build_prompt(row: dict[str, str], max_body_chars: int) -> str:
-    body = row.get("body", "")[:max_body_chars]
-    title = row.get("title", "")
-    subtitle = row.get("subtitle_or_bajada", "")
+def _build_batch_prompt(rows: list[dict[str, str]], max_body_chars: int) -> str:
+    """Build one deterministic prompt for a small group of articles.
+
+    The record ID is included in both the input and the required output so a
+    response cannot be silently assigned to the wrong CSV row.  The caller
+    still verifies the returned IDs before writing anything.
+    """
+
+    articles: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        body = row.get("body", "")[:max_body_chars]
+        record_id = row.get("record_id", "")
+        title = row.get("title", "")
+        subtitle = row.get("subtitle_or_bajada", "")
+        articles.append(
+            f"""ARTÍCULO {index}
+record_id (copia exactamente): {record_id}
+Título: {title}
+Subtítulo: {subtitle}
+Texto:
+<<<
+{body}
+>>>"""
+        )
+
     return f"""Eres un extractor de afirmaciones médicas para un corpus académico en español.
 
-Devuelve únicamente un objeto JSON válido con exactamente estas claves:
+Analiza todos los artículos que aparecen abajo. Devuelve únicamente un objeto
+JSON válido con esta forma exacta:
 {{
-  "is_medical": true,
-  "is_claim_eligible": true,
-  "claim_text": "una sola afirmación médica concreta",
-  "claim_type": "tratamiento|prevención|diagnóstico|riesgo|causa|síntoma|otro",
-  "reason": "explicación breve basada en el texto",
-  "needs_human_review": true
+  "items": [
+    {{
+      "record_id": "el record_id de entrada",
+      "is_medical": true,
+      "is_claim_eligible": true,
+      "claim_text": "una sola afirmación médica concreta",
+      "claim_type": "tratamiento|prevención|diagnóstico|riesgo|causa|síntoma|otro",
+      "reason": "explicación breve basada en el texto",
+      "needs_human_review": true
+    }}
+  ]
 }}
 
-Reglas:
-- Extrae la afirmación principal, sin inventar datos ni completar información ausente.
+Reglas obligatorias:
+- Devuelve exactamente un elemento en items por cada artículo de entrada y no agregues otros.
+- Conserva cada record_id exactamente; no lo inventes ni lo cambies.
+- Mantén el mismo orden de los artículos.
+- Extrae la afirmación principal sin inventar datos ni completar información ausente.
 - No decidas si la afirmación es verdadera o falsa; esa decisión requiere evidencia y revisión humana.
 - is_medical es false si el texto no trata sobre salud, enfermedad, medicina o bienestar.
 - is_claim_eligible es false y claim_text debe ser "" si no existe una afirmación médica concreta que pueda verificarse.
 - Mantén claim_text en español y en una sola oración.
 - needs_human_review debe ser true para cualquier afirmación elegible.
 
-Título: {title}
-Subtítulo: {subtitle}
-Texto del artículo:
-<<<
-{body}
->>>
+Artículos:
+{chr(10).join(articles)}
 """
 
 
@@ -347,7 +373,7 @@ def _find_response_text(value: Any) -> str:
     return ""
 
 
-def _json_payload(text: str) -> dict[str, Any]:
+def _json_document(text: str) -> Any:
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -359,9 +385,34 @@ def _json_payload(text: str) -> dict[str, Any]:
         if start < 0 or end <= start:
             raise
         payload = json.loads(cleaned[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("LLM response is not a JSON object")
     return payload
+
+
+def _ordered_claim_items(document: Any, rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Validate and order a batched LLM response before normalization."""
+
+    if isinstance(document, dict):
+        items = document.get("items", document.get("results"))
+        if items is None and len(rows) == 1:
+            items = [document]
+    else:
+        items = document
+    if not isinstance(items, list) or len(items) != len(rows):
+        raise ValueError(
+            f"LLM returned {len(items) if isinstance(items, list) else 0} items for {len(rows)} articles"
+        )
+    if not all(isinstance(item, dict) for item in items):
+        raise ValueError("LLM batch contains a non-object item")
+
+    expected_ids = [row.get("record_id", "").strip() for row in rows]
+    returned_ids = [str(item.get("record_id", "") or "").strip() for item in items]
+    if returned_ids != expected_ids:
+        # A model may omit IDs while still respecting the requested order.  In
+        # that case order-based matching is safe; mismatched non-empty IDs are
+        # rejected to prevent cross-row corruption.
+        if any(returned_ids) or len(set(expected_ids)) != len(expected_ids):
+            raise ValueError("LLM batch record_id values do not match input order")
+    return items
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -463,9 +514,9 @@ def _google_gemini_request(
         raise RuntimeError("Gemini returned invalid JSON") from exc
 
 
-def _call_llm(
+def _call_llm_batch(
     client: Any,
-    row: dict[str, str],
+    rows: list[dict[str, str]],
     model_id: str,
     max_body_chars: int,
     max_tokens: int,
@@ -476,8 +527,8 @@ def _call_llm(
     provider: str = "oci",
     google_api_key: str = "",
     request_timeout: float = 30.0,
-) -> tuple[dict[str, str], str]:
-    prompt = _build_prompt(row, max_body_chars)
+) -> list[tuple[dict[str, str], dict[str, str], str]]:
+    prompt = _build_batch_prompt(rows, max_body_chars)
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         if time.monotonic() >= deadline:
@@ -501,11 +552,23 @@ def _call_llm(
             raw_text = _find_response_text(result)
             if not raw_text:
                 raise ValueError(f"{provider} returned an empty response")
-            payload = _json_payload(raw_text)
-            return _normalize_claim(payload), json.dumps(payload, ensure_ascii=False)
+            document = _json_document(raw_text)
+            items = _ordered_claim_items(document, rows)
+            return [
+                (
+                    row,
+                    _normalize_claim(item),
+                    json.dumps(item, ensure_ascii=False),
+                )
+                for row, item in zip(rows, items)
+            ]
         except Exception as exc:  # noqa: BLE001 - retry transient service/parse errors once
             last_error = exc
-            if attempt < retries and time.monotonic() + 1.0 < deadline:
+            if (
+                attempt < retries
+                and _retryable_llm_error(exc)
+                and time.monotonic() + 1.0 < deadline
+            ):
                 time.sleep(1.0)
     raise RuntimeError(f"LLM call failed: {type(last_error).__name__}: {last_error}") from last_error
 
@@ -539,6 +602,24 @@ def _output_row(
 def _quota_disabled(error: Exception) -> bool:
     message = str(error).lower()
     return "set to 0" in message or "tokens-per-minute" in message and "429" in message
+
+
+def _retryable_llm_error(error: Exception) -> bool:
+    """Avoid spending a second request on permanent API/configuration errors."""
+
+    message = str(error).lower()
+    permanent_markers = (
+        "http 400",
+        "http 401",
+        "http 403",
+        "http 404",
+        "http 429",
+        "quota",
+        "rate limit",
+        "set to 0",
+        "tokens-per-minute",
+    )
+    return not any(marker in message for marker in permanent_markers)
 
 
 def _write_claims(
@@ -579,7 +660,8 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         default_model_id = DEFAULT_GOOGLE_MODEL_ID if provider == "google" else DEFAULT_MODEL_ID
         model_id = os.getenv("LLM_MODEL_ID", default_model_id).strip() or default_model_id
         region = os.getenv("LLM_REGION", os.getenv("OCI_REGION", "us-ashburn-1")).strip()
-        batch_size = _env_int("LLM_BATCH_SIZE", 10, minimum=1)
+        batch_size = _env_int("LLM_BATCH_SIZE", 5, minimum=1)
+        request_batch_size = _env_int("LLM_REQUEST_BATCH_SIZE", 5, minimum=1)
         max_seconds = _env_float("LLM_MAX_SECONDS", 240.0, minimum=1.0)
         time_buffer = _env_float("LLM_TIME_BUFFER", 10.0, minimum=0.0)
         max_body_chars = _env_int("LLM_MAX_BODY_CHARS", 12_000, minimum=500)
@@ -606,6 +688,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         last_llm_error = ""
         consecutive_errors = 0
         google_api_key = ""
+        llm_requests = 0
         if pending:
             if provider == "google":
                 secret_id = _required_env("GOOGLE_GEMINI_SECRET_OCID")
@@ -613,13 +696,14 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 llm = None
             else:
                 llm = _generative_ai_client(region, request_timeout)
-            for source_row in pending:
+            for offset in range(0, len(pending), request_batch_size):
                 if time.monotonic() >= deadline:
                     break
+                request_rows = pending[offset : offset + request_batch_size]
                 try:
-                    claim, raw_json = _call_llm(
+                    batch_results = _call_llm_batch(
                         llm,
-                        source_row,
+                        request_rows,
                         model_id,
                         max_body_chars,
                         max_tokens,
@@ -631,16 +715,22 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                         google_api_key=google_api_key,
                         request_timeout=request_timeout,
                     )
-                    output_rows.append(
-                        _output_row(source_row, claim, raw_json, run_id, model_id, "OK")
-                    )
-                    statuses["OK"] += 1
+                    llm_requests += 1
+                    for source_row, claim, raw_json in batch_results:
+                        output_rows.append(
+                            _output_row(source_row, claim, raw_json, run_id, model_id, "OK")
+                        )
+                    statuses["OK"] += len(batch_results)
                     consecutive_errors = 0
                 except TimeoutError:
                     break
                 except Exception as exc:  # noqa: BLE001 - keep failed rows pending for a later retry
-                    LOGGER.warning("Claim extraction failed for %s: %s", source_row.get("record_id"), exc)
-                    statuses["ERROR"] += 1
+                    LOGGER.warning(
+                        "Claim extraction failed for %s: %s",
+                        ",".join(row.get("record_id", "") for row in request_rows),
+                        exc,
+                    )
+                    statuses["ERROR"] += len(request_rows)
                     last_llm_error = f"{type(exc).__name__}: {exc}"[:2000]
                     consecutive_errors += 1
                     # A disabled tenancy quota cannot be fixed by sending the
@@ -669,8 +759,10 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "llm_error": last_llm_error,
             "model_id": model_id,
             "llm_provider": provider,
+            "llm_requests": str(llm_requests),
             "elapsed_seconds": f"{time.monotonic() - started:.2f}",
             "batch_size": str(batch_size),
+            "request_batch_size": str(request_batch_size),
             "scan": scan_meta,
         }
         LOGGER.info("Silver claims batch written: %s (%s rows)", object_name or "none", len(output_rows))
