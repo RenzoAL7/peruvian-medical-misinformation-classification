@@ -1,6 +1,9 @@
 # Esquema de datos vigente
 
-Google Sheets es el espacio de trabajo del corpus. El flujo sigue una organización Medallion con las pestañas `Bronze`, `Silver` y `Gold`.
+Object Storage es el espacio operativo del pipeline cloud. El flujo sigue una
+organización Medallion con los prefijos `bronze/`, `silver/` y `gold/`; las
+tablas de revisión pueden exportarse a Google Sheets o Label Studio sin perder
+los identificadores de trazabilidad.
 
 ## Bronze
 
@@ -21,12 +24,26 @@ El Colab elimina duplicados dentro de la corrida y vuelve a consultar los `recor
 
 ## Silver
 
-Solo recibe filas de `Bronze` con `selection_status=INCLUIR` y un cuerpo de al menos 150 palabras y 800 caracteres. Se limita a doce campos:
+`silver/body/` conserva el resultado técnico de extracción. `silver/claims/`
+recibe únicamente cuerpos válidos y añade el claim candidato. `silver/evidence/`
+guarda candidatos PubMed para los claims elegibles. Conserva la trazabilidad
+anterior y añade:
 
 | Campo | Uso |
 | --- | --- |
 | `record_id`, `source_name`, `topic`, `title`, `canonical_url` | Identidad y trazabilidad mínima de la noticia. |
 | `body` | Texto principal descargado desde la URL pública. |
+| `http_status` | Código HTTP obtenido. |
+| `extraction_method` | `trafilatura`, respaldo con BeautifulSoup o ausencia de extracción. |
+| `extraction_status` | `OK`, `CUERPO_INSUFICIENTE` o error de descarga. |
+| `extracted_at` | Fecha UTC de extracción. |
+| `claim_text` | Afirmación candidata en español. |
+| `claim_text_en` | Traducción fiel usada para buscar literatura biomédica. |
+| `pubmed_query_en` | Consulta PubMed en inglés generada para el claim. |
+| `query_status` | `OK`, `ERROR` o `SKIPPED_NOT_ELIGIBLE`. |
+| `pubmed_results_json` | Hasta cinco artículos candidatos con PMID, abstract, URL y similitud. |
+| `evidence_status` | `OK`, `NO_RESULTS`, `NO_ABSTRACT` o `ERROR`. |
+| `best_cosine_similarity` | Mejor similitud TF-IDF entre claim y título/abstract; sirve para ordenar, no para etiquetar. |
 | `main_medical_claim` | Afirmación médica principal delimitada manualmente. |
 | `label` | `PENDIENTE`, `RESPALDADA`, `REFUTADA`, `NO_CONCLUYENTE` o `EXCLUIDA`. |
 | `evidence_url` | Fuente especializada usada para contrastar la afirmación. |

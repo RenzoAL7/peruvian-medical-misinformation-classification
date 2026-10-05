@@ -2,20 +2,24 @@
 
 This Function is deliberately a candidate-generation step.  It does not decide
 whether a claim is true or false.  Rows whose body extraction failed, is too
-short, or is missing are excluded before the OCI Generative AI call.  Valid
-rows are sent one at a time to ``google.gemini-2.5-flash`` and the structured
-response is written to a new CSV under ``silver/claims/``.
+short, or is missing are excluded before the LLM call.  Several valid rows are
+sent in one Gemini request to reduce API calls and rate-limit pressure.  The
+structured response is written to a new CSV under ``silver/claims/``.
 """
 
 from __future__ import annotations
 
 import csv
+import base64
 import io
 import json
 import logging
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
@@ -28,8 +32,10 @@ from fdk import response
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
 
-PROMPT_VERSION = "claim-extraction-v1"
+PROMPT_VERSION = "claim-extraction-v3-english-pubmed"
+QUERY_PROMPT_VERSION = "pubmed-query-v1"
 DEFAULT_MODEL_ID = "google.gemini-2.5-flash"
+DEFAULT_GOOGLE_MODEL_ID = "gemini-3.5-flash-lite"
 CLAIM_TYPES = {"tratamiento", "prevención", "diagnóstico", "riesgo", "causa", "síntoma", "otro"}
 
 BRONZE_FIELDS = [
@@ -60,6 +66,12 @@ BODY_FIELDS = [
 
 CLAIM_FIELDS = [
     "claim_text",
+    "claim_text_en",
+    "pubmed_query_en",
+    "query_status",
+    "query_prompt_version",
+    "query_enriched_at",
+    "query_enrichment_run_id",
     "is_medical",
     "is_claim_eligible",
     "claim_type",
@@ -123,6 +135,31 @@ def _generative_ai_client(region: str, request_timeout: float) -> Any:
         timeout=(5.0, request_timeout),
         retry_strategy=oci.retry.NoneRetryStrategy(),
     )
+
+
+def _vault_secret_value(secret_id: str) -> str:
+    """Read and decode a current OCI Vault secret using the Function identity."""
+
+    signer = oci.auth.signers.get_resource_principals_signer()
+    client = oci.secrets.SecretsClient(config={}, signer=signer)
+    bundle = client.get_secret_bundle(secret_id=secret_id, stage="CURRENT").data
+    content = bundle.secret_bundle_content.content
+    if not content:
+        raise RuntimeError("The configured Vault secret has no content")
+    if isinstance(content, bytes):
+        encoded = content.decode("ascii")
+    else:
+        encoded = str(content)
+    try:
+        value = base64.b64decode(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        # Keep local/dev compatibility with a plain-text secret if the service
+        # returns it without Base64 wrapping.
+        value = encoded
+    value = value.strip()
+    if not value:
+        raise RuntimeError("The configured Vault secret is empty")
+    return value
 
 
 def _list_csv_objects(client: Any, namespace: str, bucket: str, prefix: str) -> list[str]:
@@ -232,36 +269,70 @@ def _pending_rows(
     return selected, dict(stats)
 
 
-def _build_prompt(row: dict[str, str], max_body_chars: int) -> str:
-    body = row.get("body", "")[:max_body_chars]
-    title = row.get("title", "")
-    subtitle = row.get("subtitle_or_bajada", "")
+def _build_batch_prompt(rows: list[dict[str, str]], max_body_chars: int) -> str:
+    """Build one deterministic prompt for a small group of articles.
+
+    The record ID is included in both the input and the required output so a
+    response cannot be silently assigned to the wrong CSV row.  The caller
+    still verifies the returned IDs before writing anything.
+    """
+
+    articles: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        body = row.get("body", "")[:max_body_chars]
+        record_id = row.get("record_id", "")
+        title = row.get("title", "")
+        subtitle = row.get("subtitle_or_bajada", "")
+        articles.append(
+            f"""ARTÍCULO {index}
+record_id (copia exactamente): {record_id}
+Título: {title}
+Subtítulo: {subtitle}
+Texto:
+<<<
+{body}
+>>>"""
+        )
+
     return f"""Eres un extractor de afirmaciones médicas para un corpus académico en español.
 
-Devuelve únicamente un objeto JSON válido con exactamente estas claves:
+Analiza todos los artículos que aparecen abajo. Devuelve únicamente un objeto
+JSON válido con esta forma exacta:
 {{
-  "is_medical": true,
-  "is_claim_eligible": true,
-  "claim_text": "una sola afirmación médica concreta",
-  "claim_type": "tratamiento|prevención|diagnóstico|riesgo|causa|síntoma|otro",
-  "reason": "explicación breve basada en el texto",
-  "needs_human_review": true
+  "items": [
+    {{
+      "record_id": "el record_id de entrada",
+      "is_medical": true,
+      "is_claim_eligible": true,
+      "claim_text": "una sola afirmación médica concreta",
+      "claim_text_en": "faithful English translation of claim_text",
+      "pubmed_query_en": "concise PubMed query in English using Boolean terms",
+      "claim_type": "tratamiento|prevención|diagnóstico|riesgo|causa|síntoma|otro",
+      "reason": "explicación breve basada en el texto, máximo 160 caracteres",
+      "needs_human_review": true
+    }}
+  ]
 }}
 
-Reglas:
-- Extrae la afirmación principal, sin inventar datos ni completar información ausente.
+Reglas obligatorias:
+- Devuelve exactamente un elemento en items por cada artículo de entrada y no agregues otros.
+- Conserva cada record_id exactamente; no lo inventes ni lo cambies.
+- Mantén el mismo orden de los artículos.
+- Extrae la afirmación principal sin inventar datos ni completar información ausente.
 - No decidas si la afirmación es verdadera o falsa; esa decisión requiere evidencia y revisión humana.
 - is_medical es false si el texto no trata sobre salud, enfermedad, medicina o bienestar.
 - is_claim_eligible es false y claim_text debe ser "" si no existe una afirmación médica concreta que pueda verificarse.
 - Mantén claim_text en español y en una sola oración.
+- Para una afirmación elegible, traduce claim_text fielmente a inglés en claim_text_en sin añadir hechos.
+- Para una afirmación elegible, genera pubmed_query_en en inglés con términos biomédicos y operadores AND/OR.
+- pubmed_query_en debe buscar solamente la afirmación presentada; no incluy conclusiones ni términos que no estén sustentados.
+- Si la afirmación no es elegible, claim_text_en y pubmed_query_en deben ser cadenas vacías.
+- Mantén claim_text por debajo de 350 caracteres y reason por debajo de 160 caracteres.
+- Mantén claim_text_en por debajo de 500 caracteres y pubmed_query_en por debajo de 600 caracteres.
 - needs_human_review debe ser true para cualquier afirmación elegible.
 
-Título: {title}
-Subtítulo: {subtitle}
-Texto del artículo:
-<<<
-{body}
->>>
+Artículos:
+{chr(10).join(articles)}
 """
 
 
@@ -299,7 +370,17 @@ def _find_response_text(value: Any) -> str:
         return ""
     if not isinstance(value, dict):
         return ""
-    for key in ("text", "content", "chat_response", "choices", "message", "response", "data"):
+    for key in (
+        "text",
+        "content",
+        "chat_response",
+        "choices",
+        "candidates",
+        "parts",
+        "message",
+        "response",
+        "data",
+    ):
         if key in value:
             text = _find_response_text(value[key])
             if text:
@@ -307,7 +388,7 @@ def _find_response_text(value: Any) -> str:
     return ""
 
 
-def _json_payload(text: str) -> dict[str, Any]:
+def _json_document(text: str) -> Any:
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -319,9 +400,34 @@ def _json_payload(text: str) -> dict[str, Any]:
         if start < 0 or end <= start:
             raise
         payload = json.loads(cleaned[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("LLM response is not a JSON object")
     return payload
+
+
+def _ordered_claim_items(document: Any, rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Validate and order a batched LLM response before normalization."""
+
+    if isinstance(document, dict):
+        items = document.get("items", document.get("results"))
+        if items is None and len(rows) == 1:
+            items = [document]
+    else:
+        items = document
+    if not isinstance(items, list) or len(items) != len(rows):
+        raise ValueError(
+            f"LLM returned {len(items) if isinstance(items, list) else 0} items for {len(rows)} articles"
+        )
+    if not all(isinstance(item, dict) for item in items):
+        raise ValueError("LLM batch contains a non-object item")
+
+    expected_ids = [row.get("record_id", "").strip() for row in rows]
+    returned_ids = [str(item.get("record_id", "") or "").strip() for item in items]
+    if returned_ids != expected_ids:
+        # A model may omit IDs while still respecting the requested order.  In
+        # that case order-based matching is safe; mismatched non-empty IDs are
+        # rejected to prevent cross-row corruption.
+        if any(returned_ids) or len(set(expected_ids)) != len(expected_ids):
+            raise ValueError("LLM batch record_id values do not match input order")
+    return items
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -337,14 +443,27 @@ def _normalize_claim(payload: dict[str, Any]) -> dict[str, str]:
     if claim_type not in CLAIM_TYPES:
         claim_type = "otro"
     claim_text = re.sub(r"\s+", " ", str(payload.get("claim_text", "") or "")).strip()
+    claim_text_en = re.sub(r"\s+", " ", str(payload.get("claim_text_en", "") or "")).strip()
+    pubmed_query_en = re.sub(r"\s+", " ", str(payload.get("pubmed_query_en", "") or "")).strip()
     reason = re.sub(r"\s+", " ", str(payload.get("reason", "") or "")).strip()
     is_medical = _as_bool(payload.get("is_medical"))
     eligible = _as_bool(payload.get("is_claim_eligible")) and bool(claim_text)
     if not is_medical or not eligible:
         claim_text = ""
+        claim_text_en = ""
+        pubmed_query_en = ""
         eligible = False
+        query_status = "SKIPPED_NOT_ELIGIBLE"
+    else:
+        query_status = "OK" if claim_text_en and pubmed_query_en else "ERROR"
     return {
         "claim_text": claim_text[:2000],
+        "claim_text_en": claim_text_en[:1000],
+        "pubmed_query_en": pubmed_query_en[:1000],
+        "query_status": query_status,
+        "query_prompt_version": QUERY_PROMPT_VERSION,
+        "query_enriched_at": "",
+        "query_enrichment_run_id": "",
         "is_medical": str(is_medical).lower(),
         "is_claim_eligible": str(eligible).lower(),
         "claim_type": claim_type,
@@ -374,9 +493,58 @@ def _chat_request(model_id: str, prompt: str, max_tokens: int, temperature: floa
     )
 
 
-def _call_llm(
+def _google_gemini_request(
+    api_key: str,
+    model_id: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    request_timeout: float,
+) -> Any:
+    """Call the public Gemini API without placing the API key in the payload."""
+
+    base_url = os.getenv(
+        "GOOGLE_GEMINI_ENDPOINT",
+        "https://generativelanguage.googleapis.com/v1beta",
+    ).strip().rstrip("/")
+    encoded_model = urllib.parse.quote(model_id, safe="")
+    url = f"{base_url}/models/{encoded_model}:generateContent"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "topP": top_p,
+            "maxOutputTokens": max_tokens,
+            "responseMimeType": "application/json",
+        },
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=request_timeout) as result:
+            content = result.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Gemini network error: {exc.reason}") from exc
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Gemini returned invalid JSON") from exc
+
+
+def _call_llm_batch(
     client: Any,
-    row: dict[str, str],
+    rows: list[dict[str, str]],
     model_id: str,
     max_body_chars: int,
     max_tokens: int,
@@ -384,27 +552,220 @@ def _call_llm(
     top_p: float,
     retries: int,
     deadline: float,
-) -> tuple[dict[str, str], str]:
-    prompt = _build_prompt(row, max_body_chars)
+    provider: str = "oci",
+    google_api_key: str = "",
+    request_timeout: float = 30.0,
+) -> list[tuple[dict[str, str], dict[str, str], str]]:
+    prompt = _build_batch_prompt(rows, max_body_chars)
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         if time.monotonic() >= deadline:
             raise TimeoutError("LLM batch time budget reached")
         try:
-            result = client.chat(
-                chat_details=_chat_request(model_id, prompt, max_tokens, temperature, top_p),
-                retry_strategy=oci.retry.NoneRetryStrategy(),
-            )
+            if provider == "google":
+                result = _google_gemini_request(
+                    google_api_key,
+                    model_id,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    request_timeout,
+                )
+            else:
+                result = client.chat(
+                    chat_details=_chat_request(model_id, prompt, max_tokens, temperature, top_p),
+                    retry_strategy=oci.retry.NoneRetryStrategy(),
+                )
             raw_text = _find_response_text(result)
             if not raw_text:
-                raise ValueError("OCI Generative AI returned an empty response")
-            payload = _json_payload(raw_text)
-            return _normalize_claim(payload), json.dumps(payload, ensure_ascii=False)
+                raise ValueError(f"{provider} returned an empty response")
+            document = _json_document(raw_text)
+            items = _ordered_claim_items(document, rows)
+            return [
+                (
+                    row,
+                    _normalize_claim(item),
+                    json.dumps(item, ensure_ascii=False),
+                )
+                for row, item in zip(rows, items)
+            ]
         except Exception as exc:  # noqa: BLE001 - retry transient service/parse errors once
             last_error = exc
-            if attempt < retries and time.monotonic() + 1.0 < deadline:
+            if (
+                attempt < retries
+                and _retryable_llm_error(exc)
+                and time.monotonic() + 1.0 < deadline
+            ):
                 time.sleep(1.0)
     raise RuntimeError(f"LLM call failed: {type(last_error).__name__}: {last_error}") from last_error
+
+
+def _pending_query_rows(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    claims_prefix: str,
+    batch_size: int,
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Select existing eligible claims that predate the English query fields."""
+
+    rows: list[dict[str, str]] = []
+    for object_name in _list_csv_objects(client, namespace, bucket, claims_prefix):
+        rows.extend(_read_csv_object(client, namespace, bucket, object_name))
+
+    completed: set[str] = set()
+    for row in rows:
+        record_id = row.get("record_id", "").strip()
+        if (
+            record_id
+            and row.get("is_claim_eligible", "").strip().lower() == "true"
+            and row.get("claim_text", "").strip()
+            and row.get("pubmed_query_en", "").strip()
+            and row.get("query_status", "").strip().upper() == "OK"
+        ):
+            completed.add(record_id)
+
+    selected: list[dict[str, str]] = []
+    seen: set[str] = set()
+    skipped_ineligible = 0
+    skipped_completed = 0
+    for row in rows:
+        record_id = row.get("record_id", "").strip()
+        eligible = row.get("is_claim_eligible", "").strip().lower() == "true"
+        claim_text = row.get("claim_text", "").strip()
+        if not record_id or not eligible or not claim_text:
+            skipped_ineligible += 1
+            continue
+        if record_id in completed or record_id in seen:
+            skipped_completed += 1
+            continue
+        seen.add(record_id)
+        selected.append({field: row.get(field, "").strip() for field in OUTPUT_FIELDS})
+        if len(selected) >= batch_size:
+            break
+    return selected, {
+        "claims_rows_seen": len(rows),
+        "eligible_rows_pending": len(selected),
+        "claims_query_completed": len(completed),
+        "skipped_ineligible": skipped_ineligible,
+        "skipped_completed": skipped_completed,
+    }
+
+
+def _build_query_enrichment_prompt(rows: list[dict[str, str]]) -> str:
+    items: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        items.append(
+            f"""CLAIM {index}
+record_id (copia exactamente): {row.get('record_id', '')}
+Claim en español: {row.get('claim_text', '')}
+Tipo de claim: {row.get('claim_type', 'otro')}
+"""
+        )
+    return f"""Eres un asistente de recuperación bibliográfica para un corpus académico de noticias médicas en español.
+
+Para cada claim, devuelve únicamente un objeto JSON válido con esta forma:
+{{
+  "items": [
+    {{
+      "record_id": "el record_id de entrada",
+      "claim_text_en": "traducción fiel al inglés",
+      "pubmed_query_en": "consulta concisa para PubMed usando términos biomédicos y AND/OR"
+    }}
+  ]
+}}
+
+Reglas:
+- Devuelve exactamente un item por cada claim y conserva el orden.
+- Conserva cada record_id exactamente.
+- Traduce el significado sin añadir datos ni cambiar la fuerza de la afirmación.
+- La query debe buscar el claim, no verificarlo ni concluir si es verdadero o falso.
+- Usa frases biomédicas en inglés y operadores AND/OR; evita palabras innecesarias.
+- Mantén claim_text_en por debajo de 500 caracteres y pubmed_query_en por debajo de 600 caracteres.
+
+Claims:
+{chr(10).join(items)}
+"""
+
+
+def _ordered_query_items(document: Any, rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    items = document.get("items", document.get("results")) if isinstance(document, dict) else document
+    if not isinstance(items, list) or len(items) != len(rows):
+        raise ValueError(
+            f"LLM returned {len(items) if isinstance(items, list) else 0} query items for {len(rows)} claims"
+        )
+    if not all(isinstance(item, dict) for item in items):
+        raise ValueError("LLM query batch contains a non-object item")
+    expected_ids = [row.get("record_id", "").strip() for row in rows]
+    returned_ids = [str(item.get("record_id", "") or "").strip() for item in items]
+    if returned_ids != expected_ids and any(returned_ids):
+        raise ValueError("LLM query record_id values do not match input order")
+    return items
+
+
+def _normalize_query(payload: dict[str, Any]) -> dict[str, str]:
+    claim_text_en = re.sub(r"\s+", " ", str(payload.get("claim_text_en", "") or "")).strip()
+    pubmed_query_en = re.sub(r"\s+", " ", str(payload.get("pubmed_query_en", "") or "")).strip()
+    return {
+        "claim_text_en": claim_text_en[:1000],
+        "pubmed_query_en": pubmed_query_en[:1000],
+        "query_status": "OK" if claim_text_en and pubmed_query_en else "ERROR",
+        "query_prompt_version": QUERY_PROMPT_VERSION,
+    }
+
+
+def _call_query_batch(
+    client: Any,
+    rows: list[dict[str, str]],
+    model_id: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    retries: int,
+    deadline: float,
+    provider: str = "oci",
+    google_api_key: str = "",
+    request_timeout: float = 30.0,
+) -> list[tuple[dict[str, str], dict[str, str], str]]:
+    prompt = _build_query_enrichment_prompt(rows)
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("LLM query time budget reached")
+        try:
+            if provider == "google":
+                result = _google_gemini_request(
+                    google_api_key,
+                    model_id,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    request_timeout,
+                )
+            else:
+                result = client.chat(
+                    chat_details=_chat_request(model_id, prompt, max_tokens, temperature, top_p),
+                    retry_strategy=oci.retry.NoneRetryStrategy(),
+                )
+            raw_text = _find_response_text(result)
+            if not raw_text:
+                raise ValueError("LLM returned an empty query response")
+            items = _ordered_query_items(_json_document(raw_text), rows)
+            return [
+                (row, _normalize_query(item), json.dumps(item, ensure_ascii=False))
+                for row, item in zip(rows, items)
+            ]
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if (
+                attempt < retries
+                and _retryable_llm_error(exc)
+                and time.monotonic() + 1.0 < deadline
+            ):
+                time.sleep(1.0)
+    raise RuntimeError(f"LLM query call failed: {type(last_error).__name__}: {last_error}") from last_error
 
 
 def _output_row(
@@ -428,6 +789,30 @@ def _output_row(
             "llm_processed_at": datetime.now(timezone.utc).isoformat(),
             "source_silver_object": source_row.get("source_silver_object", ""),
             "claim_run_id": run_id,
+            "query_enriched_at": datetime.now(timezone.utc).isoformat(),
+            "query_enrichment_run_id": run_id,
+        }
+    )
+    return output
+
+
+def _query_output_row(
+    source_row: dict[str, str],
+    query: dict[str, str],
+    raw_json: str,
+    run_id: str,
+    model_id: str,
+) -> dict[str, str]:
+    output = {field: source_row.get(field, "") for field in OUTPUT_FIELDS}
+    output.update(query)
+    output.update(
+        {
+            "llm_raw_json": raw_json[:8000] or source_row.get("llm_raw_json", "")[:8000],
+            "model_id": source_row.get("model_id", model_id) or model_id,
+            "query_prompt_version": QUERY_PROMPT_VERSION,
+            "query_enriched_at": datetime.now(timezone.utc).isoformat(),
+            "query_enrichment_run_id": run_id,
+            "llm_error": "",
         }
     )
     return output
@@ -438,6 +823,29 @@ def _quota_disabled(error: Exception) -> bool:
     return "set to 0" in message or "tokens-per-minute" in message and "429" in message
 
 
+def _retryable_llm_error(error: Exception) -> bool:
+    """Avoid spending a second request on permanent API/configuration errors."""
+
+    message = str(error).lower()
+    permanent_markers = (
+        "http 400",
+        "http 401",
+        "http 403",
+        "http 404",
+        "http 429",
+        "quota",
+        "rate limit",
+        "set to 0",
+        "tokens-per-minute",
+    )
+    permanent_markers += (
+        "jsondecodeerror",
+        "llm returned",
+        "record_id values do not match",
+    )
+    return not any(marker in message for marker in permanent_markers)
+
+
 def _write_claims(
     client: Any,
     namespace: str,
@@ -445,12 +853,13 @@ def _write_claims(
     prefix: str,
     rows: list[dict[str, str]],
     run_id: str,
+    object_stem: str = "claims_batch",
 ) -> str:
     csv_buffer = io.StringIO(newline="")
     writer = csv.DictWriter(csv_buffer, fieldnames=OUTPUT_FIELDS, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
-    object_name = f"{prefix.strip('/')}/claims_batch_{run_id}.csv"
+    object_name = f"{prefix.strip('/')}/{object_stem}_{run_id}.csv"
     client.put_object(
         namespace_name=namespace,
         bucket_name=bucket,
@@ -470,61 +879,123 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         bucket = _required_env("OBJECT_STORAGE_BUCKET")
         body_prefix = os.getenv("SILVER_BODY_PREFIX", "silver/body").strip("/")
         claims_prefix = os.getenv("SILVER_CLAIMS_PREFIX", "silver/claims").strip("/")
-        model_id = os.getenv("LLM_MODEL_ID", DEFAULT_MODEL_ID).strip() or DEFAULT_MODEL_ID
+        provider = os.getenv("LLM_PROVIDER", "oci").strip().lower() or "oci"
+        if provider not in {"oci", "google"}:
+            raise RuntimeError("LLM_PROVIDER must be either 'oci' or 'google'")
+        default_model_id = DEFAULT_GOOGLE_MODEL_ID if provider == "google" else DEFAULT_MODEL_ID
+        model_id = os.getenv("LLM_MODEL_ID", default_model_id).strip() or default_model_id
         region = os.getenv("LLM_REGION", os.getenv("OCI_REGION", "us-ashburn-1")).strip()
         batch_size = _env_int("LLM_BATCH_SIZE", 10, minimum=1)
+        request_batch_size = _env_int("LLM_REQUEST_BATCH_SIZE", 10, minimum=1)
         max_seconds = _env_float("LLM_MAX_SECONDS", 240.0, minimum=1.0)
         time_buffer = _env_float("LLM_TIME_BUFFER", 10.0, minimum=0.0)
         max_body_chars = _env_int("LLM_MAX_BODY_CHARS", 12_000, minimum=500)
-        max_tokens = _env_int("LLM_MAX_TOKENS", 600, minimum=50)
+        max_tokens = _env_int("LLM_MAX_TOKENS", 3000, minimum=50)
         request_timeout = _env_float("LLM_REQUEST_TIMEOUT", 30.0, minimum=5.0)
-        temperature = _env_float("LLM_TEMPERATURE", 0.1, minimum=0.0)
+        temperature = _env_float("LLM_TEMPERATURE", 0.0, minimum=0.0)
         top_p = _env_float("LLM_TOP_P", 0.9, minimum=0.0)
-        retries = _env_int("LLM_MAX_RETRIES", 1, minimum=0)
+        retries = _env_int("LLM_MAX_RETRIES", 0, minimum=0)
         if time_buffer >= max_seconds:
             raise RuntimeError("LLM_TIME_BUFFER must be smaller than LLM_MAX_SECONDS")
 
+        mode = "claims"
+        if data is not None:
+            raw_request = data.read()
+            if raw_request:
+                payload = (
+                    json.loads(raw_request.decode("utf-8"))
+                    if isinstance(raw_request, bytes)
+                    else json.loads(raw_request)
+                )
+                mode = str(payload.get("mode", "claims")).strip().lower()
+        if mode not in {"claims", "enrich_queries"}:
+            raise RuntimeError("mode must be either 'claims' or 'enrich_queries'")
+
         storage = _object_storage_client()
-        pending, scan_meta = _pending_rows(
-            storage,
-            namespace,
-            bucket,
-            body_prefix,
-            claims_prefix,
-            batch_size,
-        )
+        if mode == "enrich_queries":
+            pending, scan_meta = _pending_query_rows(
+                storage,
+                namespace,
+                bucket,
+                claims_prefix,
+                batch_size,
+            )
+        else:
+            pending, scan_meta = _pending_rows(
+                storage,
+                namespace,
+                bucket,
+                body_prefix,
+                claims_prefix,
+                batch_size,
+            )
         deadline = started + max_seconds - time_buffer
         output_rows: list[dict[str, str]] = []
         statuses: Counter[str] = Counter()
         last_llm_error = ""
         consecutive_errors = 0
+        google_api_key = ""
+        llm_requests = 0
         if pending:
-            llm = _generative_ai_client(region, request_timeout)
-            for source_row in pending:
+            if provider == "google":
+                secret_id = _required_env("GOOGLE_GEMINI_SECRET_OCID")
+                google_api_key = _vault_secret_value(secret_id)
+                llm = None
+            else:
+                llm = _generative_ai_client(region, request_timeout)
+            for offset in range(0, len(pending), request_batch_size):
                 if time.monotonic() >= deadline:
                     break
+                request_rows = pending[offset : offset + request_batch_size]
                 try:
-                    claim, raw_json = _call_llm(
-                        llm,
-                        source_row,
-                        model_id,
-                        max_body_chars,
-                        max_tokens,
-                        temperature,
-                        top_p,
-                        retries,
-                        deadline,
-                    )
-                    output_rows.append(
-                        _output_row(source_row, claim, raw_json, run_id, model_id, "OK")
-                    )
-                    statuses["OK"] += 1
+                    if mode == "enrich_queries":
+                        batch_results = _call_query_batch(
+                            llm,
+                            request_rows,
+                            model_id,
+                            max_tokens,
+                            temperature,
+                            top_p,
+                            retries,
+                            deadline,
+                            provider=provider,
+                            google_api_key=google_api_key,
+                            request_timeout=request_timeout,
+                        )
+                    else:
+                        batch_results = _call_llm_batch(
+                            llm,
+                            request_rows,
+                            model_id,
+                            max_body_chars,
+                            max_tokens,
+                            temperature,
+                            top_p,
+                            retries,
+                            deadline,
+                            provider=provider,
+                            google_api_key=google_api_key,
+                            request_timeout=request_timeout,
+                        )
+                    llm_requests += 1
+                    for source_row, claim, raw_json in batch_results:
+                        if mode == "enrich_queries":
+                            output_rows.append(_query_output_row(source_row, claim, raw_json, run_id, model_id))
+                        else:
+                            output_rows.append(
+                                _output_row(source_row, claim, raw_json, run_id, model_id, "OK")
+                            )
+                    statuses["OK"] += len(batch_results)
                     consecutive_errors = 0
                 except TimeoutError:
                     break
                 except Exception as exc:  # noqa: BLE001 - keep failed rows pending for a later retry
-                    LOGGER.warning("Claim extraction failed for %s: %s", source_row.get("record_id"), exc)
-                    statuses["ERROR"] += 1
+                    LOGGER.warning(
+                        "Claim extraction failed for %s: %s",
+                        ",".join(row.get("record_id", "") for row in request_rows),
+                        exc,
+                    )
+                    statuses["ERROR"] += len(request_rows)
                     last_llm_error = f"{type(exc).__name__}: {exc}"[:2000]
                     consecutive_errors += 1
                     # A disabled tenancy quota cannot be fixed by sending the
@@ -535,7 +1006,15 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
 
         object_name = ""
         if output_rows:
-            object_name = _write_claims(storage, namespace, bucket, claims_prefix, output_rows, run_id)
+            object_name = _write_claims(
+                storage,
+                namespace,
+                bucket,
+                claims_prefix,
+                output_rows,
+                run_id,
+                object_stem="claims_enriched_batch" if mode == "enrich_queries" else "claims_batch",
+            )
         result_status = "ok"
         if statuses.get("ERROR", 0) and not output_rows:
             result_status = "error"
@@ -543,6 +1022,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             result_status = "partial"
         result = {
             "status": result_status,
+            "mode": mode,
             "run_id": run_id,
             "bucket": bucket,
             "object_name": object_name,
@@ -552,8 +1032,11 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
             "llm_error": last_llm_error,
             "model_id": model_id,
+            "llm_provider": provider,
+            "llm_requests": str(llm_requests),
             "elapsed_seconds": f"{time.monotonic() - started:.2f}",
             "batch_size": str(batch_size),
+            "request_batch_size": str(request_batch_size),
             "scan": scan_meta,
         }
         LOGGER.info("Silver claims batch written: %s (%s rows)", object_name or "none", len(output_rows))
