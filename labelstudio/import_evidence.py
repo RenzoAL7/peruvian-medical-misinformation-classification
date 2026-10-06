@@ -66,26 +66,33 @@ def _list_tasks(base_url: str, project_id: int, token: str) -> list[dict[str, An
     return []
 
 
-def _candidate_text(row: dict[str, str]) -> str:
+def _candidates(row: dict[str, str]) -> list[dict[str, Any]]:
     try:
         candidates = json.loads(row.get("pubmed_results_json", "[]") or "[]")
     except json.JSONDecodeError:
         candidates = []
-    if not isinstance(candidates, list):
-        candidates = []
+    return [candidate for candidate in candidates if isinstance(candidate, dict)] if isinstance(candidates, list) else []
+
+
+def _candidate_text(row: dict[str, str], start: int = 0, end: int | None = None) -> str:
+    candidates = _candidates(row)[start:end]
     chunks: list[str] = []
-    for index, candidate in enumerate(candidates, start=1):
-        if not isinstance(candidate, dict):
-            continue
+    for index, candidate in enumerate(candidates, start=start + 1):
         pmid = str(candidate.get("pmid", ""))
         title = str(candidate.get("title", "")).strip()
         abstract = str(candidate.get("abstract_es", "") or candidate.get("abstract_excerpt", "")).strip()
         score = candidate.get("embedding_similarity", candidate.get("cosine_similarity", ""))
-        chunks.append(f"[{index}] PMID {pmid} | score={score}\n{title}\n{abstract}")
+        chunks.append(
+            f"[{index}] PMID {pmid} | similitud={score}\n"
+            f"Título: {title}\n"
+            f"Abstract: {abstract}\n"
+            f"PubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        )
     return "\n\n".join(chunks) or "No hay abstracts disponibles."
 
 
 def _task_from_row(row: dict[str, str]) -> dict[str, Any]:
+    candidates = _candidates(row)
     data = {
         "record_id": row.get("record_id", ""),
         "country": row.get("country", ""),
@@ -100,7 +107,12 @@ def _task_from_row(row: dict[str, str]) -> dict[str, Any]:
         "best_pmid": row.get("best_pmid", ""),
         "best_embedding_similarity": row.get("best_embedding_similarity", ""),
         "best_tfidf_similarity": row.get("best_tfidf_similarity", ""),
+        # Keep the complete text for compatibility, but expose a compact
+        # primary candidate and a separate collapsed block for the rest.
         "evidence_text": _candidate_text(row),
+        "evidence_primary": _candidate_text(row, 0, 1),
+        "evidence_additional": _candidate_text(row, 1) if len(candidates) > 1 else "No hay candidatos adicionales.",
+        "evidence_count": str(len(candidates)),
         "evidence_run_id": row.get("evidence_run_id", ""),
     }
     return {"data": data}
@@ -113,6 +125,11 @@ def main() -> int:
     parser.add_argument("--project-id", type=int, required=True)
     parser.add_argument("--token", default=os.getenv("LABEL_STUDIO_TOKEN", ""))
     parser.add_argument("--manifest", default="labelstudio/manifest.csv")
+    parser.add_argument(
+        "--refresh-existing",
+        action="store_true",
+        help="Update task data for matching record_id values without changing annotations",
+    )
     args = parser.parse_args()
 
     csv_paths: list[Path] = []
@@ -134,6 +151,11 @@ def main() -> int:
         for item in existing
         if isinstance(item.get("data"), dict)
     }
+    existing_task_ids = {
+        str(item.get("data", {}).get("record_id", "")).strip(): item.get("id")
+        for item in existing
+        if isinstance(item.get("data"), dict) and item.get("id") is not None
+    }
 
     latest_by_id: dict[str, dict[str, str]] = {}
     for path in csv_paths:
@@ -144,13 +166,28 @@ def main() -> int:
                     continue
                 latest_by_id[record_id] = {str(key): str(value or "") for key, value in row.items()}
 
+    refreshed_count = 0
+    if args.refresh_existing:
+        for record_id, row in sorted(latest_by_id.items()):
+            task_id = existing_task_ids.get(record_id)
+            if task_id is None:
+                continue
+            _request(
+                args.url,
+                f"/api/tasks/{task_id}/",
+                args.token,
+                method="PATCH",
+                payload={"data": _task_from_row(row)["data"]},
+            )
+            refreshed_count += 1
+
     tasks = [
         _task_from_row(row)
         for record_id, row in sorted(latest_by_id.items())
         if record_id not in existing_ids
     ]
     if not tasks:
-        print(json.dumps({"status": "ok", "imported": 0, "skipped_existing": len(latest_by_id)}, ensure_ascii=False))
+        print(json.dumps({"status": "ok", "imported": 0, "refreshed": refreshed_count, "skipped_existing": len(latest_by_id) - refreshed_count}, ensure_ascii=False))
         return 0
 
     result = _request(
@@ -182,7 +219,7 @@ def main() -> int:
                     "source_files": ";".join(str(path) for path in csv_paths),
                 }
             )
-    print(json.dumps({"status": "ok", "imported": imported_count, "skipped_existing": len(existing_ids), "candidate_records": len(latest_by_id), "project_id": args.project_id}, ensure_ascii=False))
+    print(json.dumps({"status": "ok", "imported": imported_count, "refreshed": refreshed_count, "skipped_existing": len(existing_ids), "candidate_records": len(latest_by_id), "project_id": args.project_id}, ensure_ascii=False))
     return 0
 
 
