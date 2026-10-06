@@ -25,6 +25,30 @@ invocaciones no recolectan noticias: recorren los CSV pendientes, completan los
 lotes que no alcanzaron a procesarse y reintentan únicamente los errores
 transitorios. Si no hay trabajo pendiente, terminan sin escribir un CSV nuevo.
 
+## Presupuesto de tiempo
+
+El timeout síncrono máximo de OCI Functions es de 300 segundos. Para no llegar
+al borde, las cuatro Functions tienen un presupuesto interno de 240 segundos y
+un margen de 10 segundos para terminar la escritura del objeto:
+
+```text
+NEWSDATA_MAX_SECONDS=240       NEWSDATA_TIME_BUFFER=10
+BODY_MAX_SECONDS=240           BODY_TIME_BUFFER=10
+LLM_MAX_SECONDS=240            LLM_TIME_BUFFER=10
+EVIDENCE_MAX_SECONDS=240
+```
+
+Los valores son límites de trabajo, no duraciones garantizadas. El lote real
+puede ser menor si las URLs son lentas, si el proveedor agota la cuota o si ya
+existe el `record_id`. Cada Function escribe las filas que alcanzó a completar
+y el drenaje horario continúa con las pendientes. Para invocación manual usa
+`--read-timeout 360`; ese parámetro pertenece al cliente OCI y no amplía el
+límite de 300 segundos de la Function.
+
+La tabla completa, incluida la duración de cada solicitud, el consumo y la
+matriz de estados, está en
+[`limits_and_timing.md`](limits_and_timing.md).
+
 ## Encadenamiento por eventos
 
 OCI Events escucha la creación de estos objetos y llama a una Function:
@@ -56,6 +80,52 @@ Evidence guarda hasta 10 candidatos PubMed dentro de
 adicionales. La puntuación `embedding_similarity` de OCI Embed 4 ordena la
 lista; el valor no es una probabilidad de veracidad. La etiqueta final se
 asigna en Label Studio.
+
+## Restricciones externas que afectan la automatización
+
+- **NewsData:** `size=10` y dos páginas por grupo producen como máximo ocho
+  solicitudes por corrida con la configuración actual. Cada página puede
+  consumir un crédito. `totalResults` describe resultados disponibles y no
+  equivale a `row_count`; la ventana reciente puede repetir URLs. La consulta
+  se mantiene por debajo de 100 caracteres por el error observado en esta
+  cuenta. Revisar el saldo y el límite del plan antes de aumentar frecuencia o
+  páginas.
+- **Gemini:** RPM, TPM y RPD son límites por proyecto y modelo. Las cuatro
+  claves pertenecen a proyectos diferentes y se usan como failover; no se
+  asume que una clave adicional multiplica la cuota de un proyecto. Las claves
+  solo se leen desde Vault durante la invocación.
+- **PubMed:** la Function respeta una pausa de 0.4 s y agrupa los PMIDs en
+  EFetch. Mantener `PUBMED_EMAIL` y `PUBMED_TOOL` configurados y no enviar
+  consultas en paralelo sin revisar las reglas de NCBI.
+- **OCI Embed 4:** el modelo `cohere.embed-v4.0` usa 512 dimensiones en este
+  pipeline y se limita por caracteres antes de crear embeddings. La API/SDK
+  admite hasta 128.000 tokens de entrada total por ejecución; las cuotas y la
+  disponibilidad dependen de la región.
+- **Scheduler:** interpreta cron en UTC, tiene intervalo mínimo de una hora y
+  no ajusta automáticamente el horario de verano. Las horas de inicio pueden
+  retrasarse por la cola del servicio.
+- **Events y Object Storage:** Events es asíncrono y puede entregar un evento
+  después de un retry; Object Storage usa prefijos, no carpetas POSIX. La
+  deduplicación por `record_id` y el drenaje horario hacen segura la repetición.
+
+Enlaces oficiales y detalles de cada límite: [OCI Functions](https://docs.oracle.com/en-us/iaas/Content/Functions/Tasks/functionscustomizing.htm),
+[Resource Scheduler](https://docs.oracle.com/en-us/iaas/Content/resource-scheduler/tasks/create-manage.htm),
+[Object Storage](https://docs.oracle.com/en-us/iaas/Content/Object/Concepts/objectstorageoverview.htm),
+[OCI Generative AI](https://docs.oracle.com/en-us/iaas/Content/generative-ai/limits.htm),
+[NewsData](https://newsdata.io/documentation) y
+[NCBI E-utilities](https://www.ncbi.nlm.nih.gov/books/NBK25497/?report=printable).
+
+## Despliegue de la imagen
+
+Las Functions se ejecutan con la forma `GENERIC_X86` y memoria de 512 MB. Al
+construir desde Apple Silicon, conserva la plataforma de OCI, por ejemplo:
+
+```bash
+DOCKER_DEFAULT_PLATFORM=linux/amd64 fn deploy --local
+```
+
+El comando exacto depende de la aplicación y el OCIR configurados; no se deben
+subir claves ni archivos `.env` a la imagen.
 
 ## Claves Gemini
 
