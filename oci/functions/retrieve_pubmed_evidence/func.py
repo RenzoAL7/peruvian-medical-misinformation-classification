@@ -1,12 +1,13 @@
 """Retrieve PubMed evidence candidates for English query-enriched claims.
 
 The function is deliberately an evidence-retrieval step. It does not decide
-whether a news claim is true or false. It reads up to a small batch of claim
-rows, queries PubMed with ESearch, downloads all returned records in one
-EFetch request, ranks the English title and abstract with OCI Cohere Embed 4,
-and writes one output row per claim. A transparent Spanish TF-IDF score is
-kept as a diagnostic and fallback. The top-k PubMed candidates are stored as
-JSON inside that row so the CSV does not expand to one row per paper.
+whether a news claim is true or false. It drains all pending claim rows that
+fit the invocation time budget, queries PubMed with ESearch, downloads all
+returned records in one EFetch request, ranks the English title and abstract
+with OCI Cohere Embed 4, and writes one output row per claim. A transparent
+Spanish TF-IDF score is kept as a diagnostic and fallback. The top-k PubMed
+candidates are stored as JSON inside that row so the CSV does not expand to one
+row per paper.
 """
 
 from __future__ import annotations
@@ -465,7 +466,7 @@ def _existing_evidence_ids(
 def _select_claims(
     rows_by_id: dict[str, dict[str, str]],
     completed_evidence_ids: set[str],
-    batch_size: int,
+    max_rows: int,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     selected: list[dict[str, str]] = []
     stats = Counter(
@@ -489,7 +490,7 @@ def _select_claims(
             stats["skipped_missing_query"] += 1
             continue
         selected.append(row)
-        if len(selected) >= batch_size:
+        if max_rows > 0 and len(selected) >= max_rows:
             break
     stats["selected"] = len(selected)
     return selected, dict(stats)
@@ -969,7 +970,7 @@ def _pending_translation_rows(
     namespace: str,
     bucket: str,
     evidence_prefix: str,
-    batch_size: int,
+    max_rows: int,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     latest: dict[str, dict[str, str]] = {}
     objects = _list_csv_objects(client, namespace, bucket, evidence_prefix)
@@ -1005,7 +1006,7 @@ def _pending_translation_rows(
             skipped_no_abstracts += 1
             continue
         selected.append({field: row.get(field, "") for field in OUTPUT_FIELDS})
-        if len(selected) >= batch_size:
+        if max_rows > 0 and len(selected) >= max_rows:
             break
     return selected, {
         "evidence_objects_scanned": len(objects),
@@ -1287,6 +1288,67 @@ def _candidate_results(
     return candidates[:top_k]
 
 
+def _embedding_batches(
+    texts: list[str],
+    max_inputs: int,
+    max_input_tokens: int,
+) -> list[list[str]]:
+    """Split Embed 4 inputs by count and a conservative token estimate."""
+
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        estimate = max(1, (len(text) + 3) // 4)
+        if current and (
+            len(current) >= max_inputs
+            or current_tokens + estimate > max_input_tokens
+        ):
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(text)
+        current_tokens += estimate
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _embed_in_batches(
+    client: Any,
+    texts: list[str],
+    compartment_id: str,
+    model_id: str,
+    input_type: str,
+    output_dimensions: int,
+    timeout: float,
+    deadline: float,
+    max_inputs: int,
+    max_input_tokens: int,
+    stats: Counter[str],
+    stats_key: str,
+) -> list[list[float]]:
+    """Embed a potentially large list without crossing the Embed 4 input cap."""
+
+    vectors: list[list[float]] = []
+    for batch in _embedding_batches(texts, max_inputs, max_input_tokens):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Embedding time budget reached")
+        vectors.extend(
+            _embed_texts(
+                client,
+                batch,
+                compartment_id,
+                model_id,
+                input_type,
+                output_dimensions,
+                timeout,
+            )
+        )
+        stats[stats_key] += 1
+    return vectors
+
+
 def _apply_embeddings(
     rows: list[dict[str, str]],
     client: Any,
@@ -1296,6 +1358,8 @@ def _apply_embeddings(
     max_chars: int,
     timeout: float,
     deadline: float,
+    max_inputs: int,
+    max_input_tokens: int,
 ) -> dict[str, Any]:
     """Rank each PubMed candidate list with one query and one document batch."""
 
@@ -1344,7 +1408,7 @@ def _apply_embeddings(
             )
 
     try:
-        query_vectors = _embed_texts(
+        query_vectors = _embed_in_batches(
             client,
             query_texts,
             compartment_id,
@@ -1352,11 +1416,15 @@ def _apply_embeddings(
             "SEARCH_QUERY",
             output_dimensions,
             timeout,
+            deadline,
+            max_inputs,
+            max_input_tokens,
+            stats,
+            "embedding_query_requests",
         )
-        stats["embedding_query_requests"] += 1
         if time.monotonic() >= deadline:
             raise TimeoutError("Embedding time budget reached before document batch")
-        document_vectors = _embed_texts(
+        document_vectors = _embed_in_batches(
             client,
             document_texts,
             compartment_id,
@@ -1364,8 +1432,21 @@ def _apply_embeddings(
             "SEARCH_DOCUMENT",
             output_dimensions,
             timeout,
+            deadline,
+            max_inputs,
+            max_input_tokens,
+            stats,
+            "embedding_document_requests",
         )
-        stats["embedding_document_requests"] += 1
+        if len(query_vectors) != len(query_texts) or len(document_vectors) != len(document_texts):
+            raise RuntimeError("OCI Embed 4 returned an incomplete batch of vectors")
+    except TimeoutError as exc:
+        detail = f"{type(exc).__name__}: {exc}"[:1500]
+        for row, _ in eligible:
+            row["embedding_status"] = "TIME_BUDGET"
+            row["evidence_error"] = detail
+        stats["embedding_errors"] += len(eligible)
+        return {"status": "time_budget", "error": detail, **dict(stats)}
     except Exception as exc:  # noqa: BLE001 - keep TF-IDF fallback available
         detail = f"{type(exc).__name__}: {exc}"[:1500]
         for row, _ in eligible:
@@ -1477,7 +1558,10 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         bucket = _required_env("OBJECT_STORAGE_BUCKET")
         claims_prefix = os.getenv("SILVER_CLAIMS_PREFIX", "silver/claims").strip("/")
         evidence_prefix = os.getenv("SILVER_EVIDENCE_PREFIX", "silver/evidence").strip("/")
-        batch_size = _env_int("EVIDENCE_BATCH_SIZE", 5, minimum=1, maximum=50)
+        # A zero max drains every pending claim. PubMed, embedding and
+        # translation calls still stop at the internal deadline, so a large
+        # backlog is written partially and picked up by the next drain.
+        max_rows = _env_int("EVIDENCE_MAX_ROWS", 0, minimum=0, maximum=1000)
         top_k = _env_int("PUBMED_TOP_K", 10, minimum=1, maximum=20)
         request_delay = _env_float("PUBMED_REQUEST_DELAY", 0.4, minimum=0.34)
         request_timeout = _env_float("PUBMED_REQUEST_TIMEOUT", 20.0, minimum=5.0)
@@ -1498,6 +1582,10 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         embedding_compartment_id = os.getenv("GENAI_COMPARTMENT_ID", "").strip()
         embedding_dimensions = _env_int("EMBEDDING_OUTPUT_DIMENSIONS", 512, minimum=256, maximum=1536)
         embedding_max_chars = _env_int("EMBEDDING_MAX_CHARS", 6000, minimum=500, maximum=20000)
+        embedding_max_inputs = _env_int("EMBEDDING_MAX_INPUTS", 96, minimum=1, maximum=1000)
+        embedding_max_input_tokens = _env_int(
+            "EMBEDDING_MAX_INPUT_TOKENS", 100000, minimum=1000, maximum=128000
+        )
         embedding_timeout = _env_float("EMBEDDING_REQUEST_TIMEOUT", 45.0, minimum=5.0)
         tool = os.getenv("PUBMED_TOOL", "mednews-thesis").strip() or "mednews-thesis"
         email = _required_env("PUBMED_EMAIL")
@@ -1545,7 +1633,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 namespace,
                 bucket,
                 evidence_prefix,
-                batch_size,
+                max_rows,
             )
             scan_meta = {
                 "claims_objects_scanned": 0,
@@ -1596,7 +1684,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 "translation_model": translation_model if translate_enabled else "",
                 "translation_key_slots_configured": str(len(translation_api_keys)) if translate_enabled else "0",
                 "top_k": str(top_k),
-                "batch_size": str(batch_size),
+                "max_rows": "all" if max_rows == 0 else str(max_rows),
                 "translation_batch_size": str(translation_batch_size),
                 "cosine_method": COSINE_METHOD,
                 "ranking_method": COSINE_METHOD,
@@ -1615,7 +1703,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
 
         claim_rows, scan_meta = _latest_claim_rows(storage, namespace, bucket, claims_prefix)
         existing_ids = _existing_evidence_ids(storage, namespace, bucket, evidence_prefix)
-        pending, selection_meta = _select_claims(claim_rows, existing_ids, batch_size)
+        pending, selection_meta = _select_claims(claim_rows, existing_ids, max_rows)
 
         query_pmids: dict[str, list[str]] = {}
         errors: dict[str, str] = {}
@@ -1703,6 +1791,8 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                         embedding_max_chars,
                         embedding_timeout,
                         deadline,
+                        embedding_max_inputs,
+                        embedding_max_input_tokens,
                     )
                 except Exception as exc:  # noqa: BLE001 - keep TF-IDF/Gemini fallback usable
                     detail = f"{type(exc).__name__}: {exc}"[:1500]
@@ -1745,13 +1835,13 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "object_name": object_name,
             "row_count": str(len(output_rows)),
             "status_counts": dict(status_counts),
-            "rows_left_for_next_run": str(max(0, len(claim_rows) - len(existing_ids) - len(output_rows))),
+            "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
             "pubmed_requests": str(pubmed_requests),
             "translation": translation_stats,
             "translation_model": translation_model if translate_enabled else "",
             "translation_key_slots_configured": str(len(translation_api_keys)) if translate_enabled else "0",
             "top_k": str(top_k),
-            "batch_size": str(batch_size),
+            "max_rows": "all" if max_rows == 0 else str(max_rows),
             "translation_batch_size": str(translation_batch_size),
             "cosine_method": (
                 EMBEDDING_METHOD
@@ -1765,6 +1855,8 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             ),
             "embedding_model": embedding_model if embeddings_enabled else "",
             "embedding_dimensions": str(embedding_dimensions) if embeddings_enabled else "",
+            "embedding_max_inputs": str(embedding_max_inputs) if embeddings_enabled else "",
+            "embedding_max_input_tokens": str(embedding_max_input_tokens) if embeddings_enabled else "",
             "embedding": embedding_stats,
             "elapsed_seconds": f"{time.monotonic() - started:.2f}",
             "scan": scan_meta,

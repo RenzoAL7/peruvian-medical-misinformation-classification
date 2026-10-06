@@ -4,7 +4,10 @@ This Function is deliberately a candidate-generation step.  It does not decide
 whether a claim is true or false.  Rows whose body extraction failed, is too
 short, or is missing are excluded before the LLM call.  Several valid rows are
 sent in one Gemini request to reduce API calls and rate-limit pressure.  The
-structured response is written to a new CSV under ``silver/claims/``.
+structured responses are written to a new CSV under ``silver/claims/``. One
+invocation drains all eligible body rows by sending bounded request batches
+until the time budget is reached; the second Gemini project key is rotated
+through those requests and used as failover.
 """
 
 from __future__ import annotations
@@ -278,7 +281,7 @@ def _pending_rows(
     bucket: str,
     body_prefix: str,
     claims_prefix: str,
-    batch_size: int,
+    max_rows: int,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Select valid, not-yet-attempted bodies across all Silver CSVs."""
 
@@ -321,7 +324,7 @@ def _pending_rows(
                 }
                 | {"source_silver_object": object_name}
             )
-            if len(selected) >= batch_size:
+            if max_rows > 0 and len(selected) >= max_rows:
                 return selected, dict(stats)
 
     return selected, dict(stats)
@@ -664,7 +667,7 @@ def _pending_query_rows(
     namespace: str,
     bucket: str,
     claims_prefix: str,
-    batch_size: int,
+    max_rows: int,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Select existing eligible claims that predate the English query fields."""
 
@@ -700,7 +703,7 @@ def _pending_query_rows(
             continue
         seen.add(record_id)
         selected.append({field: row.get(field, "").strip() for field in OUTPUT_FIELDS})
-        if len(selected) >= batch_size:
+        if max_rows > 0 and len(selected) >= max_rows:
             break
     return selected, {
         "claims_rows_seen": len(rows),
@@ -947,7 +950,10 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         default_model_id = DEFAULT_GOOGLE_MODEL_ID if provider == "google" else DEFAULT_MODEL_ID
         model_id = os.getenv("LLM_MODEL_ID", default_model_id).strip() or default_model_id
         region = os.getenv("LLM_REGION", os.getenv("OCI_REGION", "us-ashburn-1")).strip()
-        batch_size = _env_int("LLM_BATCH_SIZE", 10, minimum=1)
+        # A zero max means "drain every eligible body".  The request batch
+        # remains small so each Gemini call has a bounded prompt, while the
+        # invocation can continue with the next batch until its deadline.
+        max_rows = _env_int("LLM_MAX_ROWS", 0, minimum=0)
         request_batch_size = _env_int("LLM_REQUEST_BATCH_SIZE", 10, minimum=1)
         max_seconds = _env_float("LLM_MAX_SECONDS", 240.0, minimum=1.0)
         time_buffer = _env_float("LLM_TIME_BUFFER", 10.0, minimum=0.0)
@@ -980,7 +986,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 namespace,
                 bucket,
                 claims_prefix,
-                batch_size,
+                max_rows,
             )
         else:
             pending, scan_meta = _pending_rows(
@@ -989,7 +995,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 bucket,
                 body_prefix,
                 claims_prefix,
-                batch_size,
+                max_rows,
             )
         deadline = started + max_seconds - time_buffer
         output_rows: list[dict[str, str]] = []
@@ -1126,7 +1132,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "llm_requests": str(llm_requests),
             "llm_key_slots_configured": str(len(google_api_keys)) if provider == "google" else "oci",
             "elapsed_seconds": f"{time.monotonic() - started:.2f}",
-            "batch_size": str(batch_size),
+            "max_rows": "all" if max_rows == 0 else str(max_rows),
             "request_batch_size": str(request_batch_size),
             "scan": scan_meta,
         }

@@ -24,7 +24,7 @@ SILVER_CLAIMS_PREFIX=silver/claims
 LLM_MODEL_ID=google.gemini-2.5-flash
 LLM_REGION=us-ashburn-1
 GENAI_COMPARTMENT_ID=<Cloud compartment OCID>
-LLM_BATCH_SIZE=10
+LLM_MAX_ROWS=0
 LLM_REQUEST_BATCH_SIZE=10
 LLM_MAX_SECONDS=240
 LLM_TIME_BUFFER=10
@@ -53,12 +53,15 @@ group must be allowed to read both secrets. The request uses the
 `llm_key_slot` records which loaded slot produced each row without exposing the
 key.
 
-The batch is filled across all CSVs in `silver/body/`, in deterministic object
-name order. Record IDs already present in `silver/claims/` are skipped, so a
-second invocation continues with new rows. `LLM_BATCH_SIZE` limits the number
-of rows processed by one invocation; `LLM_REQUEST_BATCH_SIZE` limits the
-number of rows sent in one Gemini request. The recommended values above make
-one request per invocation for ten articles. Eligible rows include
+The pending rows are filled across all CSVs in `silver/body/`, in deterministic
+object name order. Record IDs already present in `silver/claims/` are skipped,
+so a second invocation continues with new rows. `LLM_MAX_ROWS=0` means that one
+invocation drains every eligible body it can finish before the internal time
+budget. Set it to a positive value only for a deliberate cap. The legacy
+`LLM_BATCH_SIZE` variable is no longer used as the invocation cap.
+`LLM_REQUEST_BATCH_SIZE` limits the number of rows sent in one Gemini request;
+the recommended value 10 keeps each prompt bounded while the function sends
+the next request in the same invocation. Eligible rows include
 `claim_text_en` and `pubmed_query_en`, so the evidence Function can query
 English PubMed abstracts without another Gemini request. The Function writes
 successful rows when the internal time budget is reached. If Gemini is
@@ -69,10 +72,11 @@ HTTP 4xx, quota, rate-limit, and malformed JSON failures are not retried
 inside the same invocation, so a failed request does not consume a duplicate
 API call.
 
-The current limit is 10 rows per invocation and a 240-second internal budget
-with a 10-second buffer before OCI's 300-second synchronous limit. The Google
-provider sends one request for the batch of up to ten rows; the actual time is
-dominated by body length, response tokens and project quota. See
+The current request batch is 10 rows, while the invocation drains all pending
+rows that fit within the 240-second internal budget and 10-second buffer before
+OCI's 300-second synchronous limit. With 50 eligible bodies this means five
+Gemini requests, alternating the two configured project keys. The actual time
+is dominated by body length, response tokens and project quota. See
 [`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md) for the
 provider, quota and retry matrix.
 
@@ -104,9 +108,10 @@ oci fn function invoke \
   --read-timeout 360
 ```
 
-This mode processes up to `LLM_BATCH_SIZE` existing eligible claims per call
-and writes `claims_query_enriched_<run_id>.csv` in the same prefix. It is
-idempotent: rows whose `query_status` is already `OK` are not enriched again.
+This mode also drains all existing eligible claims by default and writes
+`claims_query_enriched_<run_id>.csv` in the same prefix. Set `LLM_MAX_ROWS` to a
+positive value if the migration must be split deliberately. It is idempotent:
+rows whose `query_status` is already `OK` are not enriched again.
 
 ## Manual invocation
 

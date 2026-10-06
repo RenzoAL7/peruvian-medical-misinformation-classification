@@ -52,10 +52,11 @@ fetch-newsdata -> bronze/*.csv
                               retrieve-pubmed-evidence -> silver/evidence/*.csv
 ```
 
-Los tres pasos Silver también tienen una invocación horaria de drenaje. Así,
-body (50), claims (10) y evidence (5) mantienen sus límites de ejecución, pero
-las filas pendientes y los errores transitorios continúan automáticamente en
-la siguiente hora.
+Los tres pasos Silver también tienen una invocación horaria de drenaje. Body
+selecciona hasta 50 filas; claims intenta drenar todas las filas elegibles en
+solicitudes Gemini de 10; evidence intenta drenar todas las claims elegibles y
+conserva hasta 10 artículos PubMed por claim. Si una etapa llega a su presupuesto
+de tiempo, cuota o error transitorio, la siguiente hora continúa con lo pendiente.
 
 Las Functions mantienen el estado en los CSV y deduplican por `record_id`. Un
 error temporal de red, PubMed o extracción queda auditado y puede reintentarse
@@ -65,16 +66,19 @@ en una ejecución posterior; un resultado terminal no se vuelve a procesar.
 
 Los valores actuales son presupuestos por invocación: NewsData recolecta hasta
 50 filas con un máximo normal de ocho solicitudes por corrida; body procesa 50
-filas; claims procesa 10; evidence procesa 5 claims y conserva hasta 10
-artículos PubMed por claim. Cada Function tiene un presupuesto interno de
+filas; claims intenta todas las filas pendientes en solicitudes de 10; evidence
+intenta todas las claims pendientes y conserva hasta 10 artículos PubMed por
+claim. Cada Function tiene un presupuesto interno de
 aproximadamente 240 segundos y deja 10 segundos antes del límite síncrono de
 300 segundos de OCI Functions. Si una etapa no termina, escribe el trabajo
 completado y el drenaje horario continúa con las filas pendientes.
 
 El tiempo extremo a extremo no es un único timeout: un CSV Bronze de 50 filas
-requiere hasta 5 lotes de claims y 10 de evidence. Events suele adelantar el
-siguiente lote y el drenaje horario cubre lo que quede pendiente; por eso la
-duración real se mide con `elapsed_seconds`, `row_count` y los objetos escritos.
+requiere hasta 5 solicitudes Gemini de claims. Evidence intenta trabajar todas
+las claims resultantes en la misma invocación; si las búsquedas PubMed,
+embeddings o traducciones no caben en el presupuesto, el drenaje horario cubre
+lo que quede pendiente. La duración real se mide con `elapsed_seconds`,
+`row_count` y los objetos escritos.
 
 NewsData trabaja con una ventana reciente, por lo que la misma URL puede
 aparecer en dos corridas. Bronze deduplica por `record_id`; `row_count` y
