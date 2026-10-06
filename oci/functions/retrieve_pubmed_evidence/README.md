@@ -67,8 +67,9 @@ query is left pending for a later enrichment run.
 
 `EVIDENCE_MAX_ROWS=0` means that the Function selects every eligible claim that
 does not have terminal evidence and works through them until the internal time
-budget. Set a positive value only to deliberately cap a run. The current
-240-second budget leaves a safety margin before OCI's 300-second synchronous
+budget. Set a positive value only to deliberately cap a run. The legacy
+`EVIDENCE_BATCH_SIZE` variable is not used as an invocation cap. The 240-second
+budget leaves a safety margin before OCI's 300-second synchronous
 limit, waits 0.4 seconds between PubMed requests, translates abstracts in
 groups of 2, and alternates the two configured translation keys, using the
 other key as failover when a project quota or transient provider error occurs.
