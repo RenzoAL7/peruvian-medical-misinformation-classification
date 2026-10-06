@@ -69,11 +69,14 @@ humano en Label Studio.
 | --- | --- | ---: | --- |
 | Bronze | `fetch-newsdata` | 50 noticias nuevas | `bronze/newsdata_<run_id>.csv` |
 | Silver body | `extract-news-body` | 50 filas | `silver/body/body_<run_id>.csv` |
-| Silver claims | `extract-claims` | 10 filas, una solicitud Gemini por lote | `silver/claims/claims_<run_id>.csv` |
-| Silver evidence | `retrieve-pubmed-evidence` | 5 claims | `silver/evidence/evidence_<run_id>.csv` |
+| Silver claims | `extract-claims` | Todas las filas elegibles pendientes; solicitudes Gemini de 10 filas | `silver/claims/claims_<run_id>.csv` |
+| Silver evidence | `retrieve-pubmed-evidence` | Todas las claims elegibles pendientes; hasta 10 artículos por claim | `silver/evidence/evidence_<run_id>.csv` |
 
-Los lotes pequeños de claims y evidence se drenan cada hora para que una
-corrida de 50 noticias no quede limitada al primer evento de Object Storage.
+Claims y evidence recorren todos los pendientes en una invocación y detienen el
+trabajo al alcanzar el presupuesto interno. Las solicitudes individuales siguen
+siendo pequeñas: claims envía 10 filas por llamada Gemini y evidence traduce en
+grupos de 2 abstracts. El drenaje horario cubre lo que no terminó por tiempo,
+cuota o error transitorio.
 
 Evidence guarda hasta 10 candidatos PubMed dentro de
 `pubmed_results_json`. Eso son diez candidatos por claim, no diez filas

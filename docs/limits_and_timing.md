@@ -17,8 +17,8 @@ estaba activa conserva su comportamiento anterior hasta ese despliegue.
 | --- | --- | ---: | ---: | --- |
 | Recolección NewsData | Scheduler, 08:00 y 20:00 Lima | 50 filas nuevas; hasta 8 solicitudes con la configuración actual | 240 s + 10 s de margen | `bronze/newsdata_<run_id>.csv` |
 | Extracción del cuerpo | Event `bronze/*.csv` + drenaje horario | 50 filas | 240 s + 10 s de margen | `silver/body/body_<run_id>.csv` |
-| Claims | Event `silver/body/*.csv` + drenaje horario | 10 filas y una solicitud Gemini por lote | 240 s + 10 s de margen | `silver/claims/claims_<run_id>.csv` |
-| Evidence | Event `silver/claims/*.csv` + drenaje horario | 5 claims; hasta 10 artículos PubMed por claim | 240 s + margen de 10 s dentro del código | `silver/evidence/evidence_<run_id>.csv` |
+| Claims | Event `silver/body/*.csv` + drenaje horario | Todas las filas elegibles; solicitudes Gemini de 10 filas | 240 s + 10 s de margen | `silver/claims/claims_<run_id>.csv` |
+| Evidence | Event `silver/claims/*.csv` + drenaje horario | Todas las claims elegibles; hasta 10 artículos PubMed por claim | 240 s + margen de 10 s dentro del código | `silver/evidence/evidence_<run_id>.csv` |
 | Etiquetado | Persona en Label Studio | No tiene timeout de OCI | Depende del equipo | Gold revisado |
 
 Los tamaños son límites superiores, no cantidades garantizadas. Si una etapa
@@ -37,13 +37,15 @@ filas porque NewsData entrega una ventana reciente y Bronze ya puede contener
 El tiempo de una Function y el tiempo de todo el pipeline son cosas distintas.
 Events puede iniciar la siguiente etapa poco después del `PUT`, pero el
 servicio es asíncrono; el drenaje horario es el mecanismo de seguridad. Para un
-CSV Bronze de 50 filas, el plan de lotes requiere como máximo 5 invocaciones de
-claims (`50 / 10`) y 10 invocaciones de evidence (`50 / 5`) después de que body
-termine. Si una sola salida de body dispara la primera invocación y el resto se
-atiende únicamente con el drenaje horario, esas etapas pueden ocupar varias
-horas de reloj. El tiempo observado depende de la cola de OCI, Events, URLs,
-cuotas y errores; se debe reportar desde `elapsed_seconds` y los nombres de
-objetos, no inferirlo solo desde la hora del Scheduler.
+CSV Bronze de 50 filas, claims hace como máximo 5 solicitudes Gemini de 10
+filas dentro de una invocación. Evidence intenta procesar todas las claims
+resultantes en esa invocación: hace una búsqueda PubMed por claim, agrupa el
+EFetch, trocea los embeddings y traduce abstracts en grupos de 2. Si ese trabajo
+no cabe en 230 segundos efectivos, la salida parcial y el drenaje horario
+continúan con las filas restantes. El tiempo observado depende de la cola de
+OCI, Events, URLs, PubMed, cuotas y errores; se debe reportar desde
+`elapsed_seconds` y los nombres de objetos, no inferirlo solo desde la hora del
+Scheduler.
 
 ## Duración y límites de OCI Functions
 
@@ -139,8 +141,10 @@ una fila sin explicación: `HTTP_ERROR`, `TIMEOUT`, `URL_ERROR` y
 
 ## Claims y Gemini
 
-Claims usa como máximo 10 filas por invocación y agrupa esas filas en una
-solicitud Gemini. Las cuatro claves existentes son de proyectos distintos, pero
+Claims intenta drenar todas las filas elegibles de `silver/body/` en una
+invocación. Agrupa diez filas por solicitud Gemini y continúa con la siguiente
+solicitud hasta terminar o alcanzar el presupuesto. Usa las claves Gemini 1 y 2
+de proyectos distintos, pero
 la cuota de Gemini se mide por proyecto y modelo en RPM, TPM y RPD; cuatro
 claves del mismo proyecto no multiplicarían la cuota. La Function rota entre
 los proyectos configurados y usa el siguiente slot solo como failover cuando
@@ -152,7 +156,9 @@ de verdad para el proyecto y el modelo seleccionados.
 
 El límite práctico de una corrida lo determinan los tokens enviados (cuerpo
 recortado a `LLM_MAX_BODY_CHARS`), la respuesta JSON y la ventana de cuota, no
-solo el número de filas. Por eso el lote de 10 es deliberadamente pequeño.
+solo el número de filas. Por eso el lote de 10 es el tamaño de cada solicitud,
+no el máximo de claims de la invocación. `LLM_MAX_ROWS=0` deja el máximo sin
+tope explícito; el presupuesto de tiempo sigue siendo el límite efectivo.
 Una respuesta incompleta o JSON inválido deja esas filas pendientes; no se
 escribe un claim parcialmente asignado a otro `record_id`.
 
@@ -161,9 +167,10 @@ y [API key security](https://ai.google.dev/gemini-api/docs/api-key).
 
 ## Evidence, PubMed y OCI Embed 4
 
-Evidence toma 5 claims por invocación. Para cada claim hace una búsqueda
-PubMed en inglés, recupera los abstracts de los PMIDs devueltos y conserva
-hasta 10 candidatos dentro de `pubmed_results_json`; no crea 50 filas nuevas.
+Evidence intenta tomar todas las claims elegibles pendientes por invocación.
+Para cada claim hace una búsqueda PubMed en inglés, recupera los abstracts de
+los PMIDs devueltos y conserva hasta 10 candidatos dentro de
+`pubmed_results_json`; no crea 50 filas nuevas por claim.
 La configuración incluye una pausa de 0.4 s entre solicitudes, un ESearch por
 claim y un EFetch agrupado para los PMIDs de ese lote. Los abstracts se
 traducen en grupos de 2 con las claves Gemini 3 y 4. Si falla la traducción,

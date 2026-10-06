@@ -6,8 +6,9 @@ retrieves candidate biomedical evidence from PubMed, ranks the returned
 English candidates with OCI Generative AI `cohere.embed-v4.0`, translates only
 the returned abstracts with a separate Gemini secret, and writes one CSV row
 per claim under `silver/evidence/`. The top-k articles are stored in the
-`pubmed_results_json` column so a batch of five claims does not become fifty
-CSV rows.
+`pubmed_results_json` column, so ten candidates per claim remain inside that
+row instead of becoming ten extra CSV rows. The Function can drain all pending
+claims in one invocation.
 
 This Function does not assign a truth label. `evidence_status=OK` means that
 PubMed returned candidate records, not that the news claim is supported. The
@@ -21,7 +22,7 @@ OBJECT_STORAGE_NAMESPACE=idur1kkrru56
 OBJECT_STORAGE_BUCKET=mednews-data
 SILVER_CLAIMS_PREFIX=silver/claims
 SILVER_EVIDENCE_PREFIX=silver/evidence
-EVIDENCE_BATCH_SIZE=5
+EVIDENCE_MAX_ROWS=0
 PUBMED_TOP_K=10
 PUBMED_EMAIL=<research contact email>
 PUBMED_TOOL=mednews-thesis
@@ -42,6 +43,8 @@ EMBEDDING_REGION=us-ashburn-1
 EMBEDDING_MODEL_ID=cohere.embed-v4.0
 EMBEDDING_OUTPUT_DIMENSIONS=512
 EMBEDDING_MAX_CHARS=6000
+EMBEDDING_MAX_INPUTS=96
+EMBEDDING_MAX_INPUT_TOKENS=100000
 EMBEDDING_REQUEST_TIMEOUT=45
 ```
 
@@ -62,11 +65,15 @@ already present in `silver/evidence/` are skipped. Transient PubMed, network,
 timeout, and server errors remain eligible for a later retry. A claim without a
 query is left pending for a later enrichment run.
 
-The current limit is 5 claims per invocation and a 240-second internal budget.
-The implementation leaves a safety margin before OCI's 300-second synchronous
+`EVIDENCE_MAX_ROWS=0` means that the Function selects every eligible claim that
+does not have terminal evidence and works through them until the internal time
+budget. Set a positive value only to deliberately cap a run. The current
+240-second budget leaves a safety margin before OCI's 300-second synchronous
 limit, waits 0.4 seconds between PubMed requests, translates abstracts in
-groups of 2, and falls back to the next translation key when a project quota
-or transient provider error occurs. See
+groups of 2, and alternates the two configured translation keys, using the
+other key as failover when a project quota or transient provider error occurs.
+The Embed 4 requests are chunked by input count and a conservative 100,000-token
+estimate so a large set of claims does not exceed the model input limit. See
 [`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md) for the
 complete duration, PubMed and Embed 4 limits.
 
