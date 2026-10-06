@@ -62,6 +62,14 @@ already present in `silver/evidence/` are skipped. Transient PubMed, network,
 timeout, and server errors remain eligible for a later retry. A claim without a
 query is left pending for a later enrichment run.
 
+The current limit is 5 claims per invocation and a 240-second internal budget.
+The implementation leaves a safety margin before OCI's 300-second synchronous
+limit, waits 0.4 seconds between PubMed requests, translates abstracts in
+groups of 2, and falls back to the next translation key when a project quota
+or transient provider error occurs. See
+[`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md) for the
+complete duration, PubMed and Embed 4 limits.
+
 ## Output
 
 ```text

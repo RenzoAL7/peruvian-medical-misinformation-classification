@@ -30,6 +30,8 @@ NEWSDATA_COUNTRY_GROUP_SIZE=5
 NEWSDATA_COUNTRY_DELAY=1
 NEWSDATA_PAGE_DELAY=1
 NEWSDATA_MAX_RETRIES=2
+NEWSDATA_MAX_SECONDS=240
+NEWSDATA_TIME_BUFFER=10
 NEWSDATA_REMOVEDUPLICATE=1
 NEWSDATA_VIDEO=0
 NEWSDATA_COUNTRY_SEQUENCE=ar,bo,cl,co,cr,cu,do,ec,gt,hn,mx,ni,pa,pe,pr,py,sv,uy,ve
@@ -69,8 +71,23 @@ batch has fewer than 50; set it to `1` only when an incomplete CSV must be
 rejected. A target of 50 keeps the Bronze batch small enough for the next body
 extraction step to run within the OCI Functions timeout. The query broadens the
 medical vocabulary and must remain at most 100 characters because that is the
-NewsData API limit. Increase `NEWSDATA_TARGET_ROWS` later if measured runtime
-and API availability support larger batches.
+NewsData API limit. `NEWSDATA_MAX_SECONDS` is an internal 240-second budget and
+`NEWSDATA_TIME_BUFFER` reserves 10 seconds before OCI's 300-second synchronous
+limit. If the budget is reached, the function writes the rows collected so far
+when `NEWSDATA_REQUIRE_TARGET_ROWS=0` and leaves the remaining countries for a
+later scheduled run. Increase `NEWSDATA_TARGET_ROWS` or
+`NEWSDATA_MAX_PAGES` only after measuring elapsed time and checking the account's
+credit balance.
+
+The request metadata records `requests_made`, `pages_fetched`,
+`articles_received`, `total_results`, `elapsed_seconds`,
+`time_budget_reached`, and the key slots used. `total_results` is not the CSV
+row count: the latter is reduced by country
+validation and `record_id` deduplication. NewsData's latest endpoint can expose
+the same article again during its recent-news window, so the Bronze history is
+always consulted before a row is written. See the full operational limits in
+[`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md) and the
+[NewsData documentation](https://newsdata.io/documentation).
 
 The function writes objects like:
 

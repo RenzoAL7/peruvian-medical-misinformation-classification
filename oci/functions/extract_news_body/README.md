@@ -36,6 +36,11 @@ the 300-second OCI Functions limit. If pages are slow, the function writes the
 rows completed before the internal deadline and the remaining Bronze rows stay
 pending for the next invocation.
 
+The usual budget is 240 seconds with `BODY_TIME_BUFFER=10`; each URL has a
+15-second request timeout and at most one retry. The elapsed time and pending
+rows are visible in the invocation log. See the consolidated limits and
+duration table in [`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md).
+
 The function reads all existing Silver CSVs and skips `record_id` values with a
 terminal result. This prevents repeated requests to blocked or paywalled sites
 while allowing timeouts, connection failures, throttling, and server errors to

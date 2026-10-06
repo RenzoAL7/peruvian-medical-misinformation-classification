@@ -69,6 +69,13 @@ HTTP 4xx, quota, rate-limit, and malformed JSON failures are not retried
 inside the same invocation, so a failed request does not consume a duplicate
 API call.
 
+The current limit is 10 rows per invocation and a 240-second internal budget
+with a 10-second buffer before OCI's 300-second synchronous limit. The Google
+provider sends one request for the batch of up to ten rows; the actual time is
+dominated by body length, response tokens and project quota. See
+[`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md) for the
+provider, quota and retry matrix.
+
 ## Output
 
 Successful invocations write a CSV such as:

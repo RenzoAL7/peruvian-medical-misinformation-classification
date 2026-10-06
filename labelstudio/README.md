@@ -63,6 +63,17 @@ exporta como la columna canónica `label`. El CSV resultante debe revisarse
 antes de generar el split 70/15/15. `annotation_id` permite volver a la tarea
 exacta.
 
+## Cuándo importar y cuánto demora
+
+La importación se puede ejecutar después de cada CSV de evidence o en lotes
+diarios. No depende de los cron de OCI: Label Studio es la etapa humana y no
+tiene el timeout síncrono de una Function. El manifest local y la consulta del
+`record_id` existente hacen que volver a ejecutar el comando sea seguro. Una
+fila que todavía no esté en estado `OK` se deja fuera hasta que evidence la
+complete en una corrida posterior. Los tiempos de las Functions, el drenaje
+horario y los límites de PubMed/Gemini/Embed están en
+[`docs/limits_and_timing.md`](../docs/limits_and_timing.md).
+
 ## Trabajo entre dos personas
 
 Para colaborar en la misma instancia, el dueño del proyecto invita al otro

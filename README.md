@@ -61,6 +61,35 @@ Las Functions mantienen el estado en los CSV y deduplican por `record_id`. Un
 error temporal de red, PubMed o extracción queda auditado y puede reintentarse
 en una ejecución posterior; un resultado terminal no se vuelve a procesar.
 
+## Duración, límites y consumo
+
+Los valores actuales son presupuestos por invocación: NewsData recolecta hasta
+50 filas con un máximo normal de ocho solicitudes por corrida; body procesa 50
+filas; claims procesa 10; evidence procesa 5 claims y conserva hasta 10
+artículos PubMed por claim. Cada Function tiene un presupuesto interno de
+aproximadamente 240 segundos y deja 10 segundos antes del límite síncrono de
+300 segundos de OCI Functions. Si una etapa no termina, escribe el trabajo
+completado y el drenaje horario continúa con las filas pendientes.
+
+El tiempo extremo a extremo no es un único timeout: un CSV Bronze de 50 filas
+requiere hasta 5 lotes de claims y 10 de evidence. Events suele adelantar el
+siguiente lote y el drenaje horario cubre lo que quede pendiente; por eso la
+duración real se mide con `elapsed_seconds`, `row_count` y los objetos escritos.
+
+NewsData trabaja con una ventana reciente, por lo que la misma URL puede
+aparecer en dos corridas. Bronze deduplica por `record_id`; `row_count` y
+`request_meta` indican cuántas filas se guardaron y cuántas solicitudes se
+realizaron. `totalResults` de la API no equivale al número de filas del CSV.
+Gemini aplica cuotas por proyecto y modelo (RPM, TPM y RPD), no una cuota
+ilimitada por cada clave; las cuatro claves se usan como rotación/failover.
+PubMed se limita con una pausa de 0.4 segundos y Embed 4 ordena candidatos sin
+convertir la similitud en una etiqueta de verdad.
+
+La tabla completa de duraciones, límites, reintentos, créditos y auditoría está
+en [`docs/limits_and_timing.md`](docs/limits_and_timing.md). Incluye enlaces a
+la documentación oficial de OCI Functions, Scheduler, Events, Object Storage,
+Generative AI, NewsData, Gemini y PubMed.
+
 ## Flujo local histórico (no es el flujo operativo)
 
 Los scripts y registros de la primera exploración se conservan para
@@ -118,6 +147,8 @@ tests/
   test_repository_hygiene.py     evita versionar datos CSV
 docs/
   data_schema.md                 columnas de Bronze, Silver, claims, evidencia y Gold
+  limits_and_timing.md            duración, cuotas, límites y operación del pipeline
+  oci_automation.md               Scheduler, Events, lotes y reintentos
   methodology.md                 metodología implementada
 data/00_control/                 registro temporal de corridas
 data/01_candidates/              CSV temporal de cada corrida

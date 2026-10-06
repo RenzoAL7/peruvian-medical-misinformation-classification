@@ -128,6 +128,16 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _env_float(name: str, default: float, minimum: float | None = None) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if minimum is not None and value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}")
+    return value
+
+
 def _secret_value(secret_id: str) -> str:
     signer = oci.auth.signers.get_resource_principals_signer()
     client = oci.secrets.SecretsClient(config={}, signer=signer)
@@ -365,6 +375,7 @@ def _existing_record_ids(
 def _request_newsdata(
     api_key: str,
     requested_country: str | None = None,
+    deadline: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     endpoint = os.getenv("NEWSDATA_ENDPOINT", "https://newsdata.io/api/1/latest").strip()
     params: dict[str, str] = {
@@ -418,8 +429,15 @@ def _request_newsdata(
     last_status = ""
 
     while pages_fetched < max_pages:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("NewsData batch time budget reached")
         if pages_fetched and page_delay:
-            time.sleep(page_delay)
+            remaining = deadline - time.monotonic() if deadline is not None else page_delay
+            if remaining <= 0:
+                raise TimeoutError("NewsData batch time budget reached")
+            time.sleep(min(page_delay, remaining))
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("NewsData batch time budget reached")
         page_params = dict(params)
         if next_page:
             page_params["page"] = next_page
@@ -429,8 +447,15 @@ def _request_newsdata(
             method="GET",
         )
         for attempt in range(max_retries + 1):
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("NewsData batch time budget reached")
+                request_timeout = min(timeout, max(0.1, remaining))
+            else:
+                request_timeout = timeout
             try:
-                with urlopen(request, timeout=timeout) as result:
+                with urlopen(request, timeout=request_timeout) as result:
                     raw = result.read()
                     last_status = str(result.status)
                 break
@@ -448,7 +473,17 @@ def _request_newsdata(
                     pages_fetched + 1,
                     retry_delay,
                 )
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= retry_delay:
+                        raise TimeoutError("NewsData batch time budget reached")
                 time.sleep(retry_delay)
+            except TimeoutError as exc:
+                if "batch time budget" in str(exc).lower() or (
+                    deadline is not None and time.monotonic() >= deadline
+                ):
+                    raise
+                raise RuntimeError(f"NewsData request timed out: {exc}") from exc
             except URLError as exc:
                 raise RuntimeError(f"NewsData request failed: {exc.reason}") from exc
 
@@ -501,6 +536,7 @@ def _request_newsdata_with_failover(
     api_keys: list[str],
     requested_country: str,
     key_start_index: int,
+    deadline: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Try the assigned key first, then fail over to another configured key."""
 
@@ -511,6 +547,7 @@ def _request_newsdata_with_failover(
             payload, request_meta = _request_newsdata(
                 api_keys[key_slot],
                 requested_country=requested_country,
+                deadline=deadline,
             )
         except RuntimeError as exc:
             errors.append(f"slot {key_slot + 1}: {str(exc)[:240]}")
@@ -533,6 +570,7 @@ def _collect_country_batch(
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """Collect one ordered country page at a time until the batch is full."""
 
+    started = time.monotonic()
     try:
         target_rows = int(os.getenv("NEWSDATA_TARGET_ROWS", "50"))
     except ValueError as exc:
@@ -553,6 +591,11 @@ def _collect_country_batch(
         raise RuntimeError("NEWSDATA_COUNTRY_DELAY must be a number") from exc
     if country_delay < 0:
         raise RuntimeError("NEWSDATA_COUNTRY_DELAY cannot be negative")
+    max_seconds = _env_float("NEWSDATA_MAX_SECONDS", 240.0, minimum=30.0)
+    time_buffer = _env_float("NEWSDATA_TIME_BUFFER", 10.0, minimum=0.0)
+    if time_buffer >= max_seconds:
+        raise RuntimeError("NEWSDATA_TIME_BUFFER must be smaller than NEWSDATA_MAX_SECONDS")
+    deadline = time.monotonic() + max_seconds - time_buffer
 
     dedup_enabled = os.getenv("BRONZE_DEDUP_ENABLED", "1").strip().lower() not in {
         "0",
@@ -577,13 +620,20 @@ def _collect_country_batch(
     for group_index, country_group in enumerate(country_groups):
         if len(rows) >= target_rows:
             break
+        if time.monotonic() >= deadline:
+            break
 
         requested_country = ",".join(country_group)
-        payload, request_meta = _request_newsdata_with_failover(
-            api_keys,
-            requested_country=requested_country,
-            key_start_index=group_index % len(api_keys),
-        )
+        try:
+            payload, request_meta = _request_newsdata_with_failover(
+                api_keys,
+                requested_country=requested_country,
+                key_start_index=group_index % len(api_keys),
+                deadline=deadline,
+            )
+        except TimeoutError:
+            LOGGER.warning("NewsData collection stopped at the internal time budget")
+            break
         candidates = _bronze_rows(payload, retrieved_at, set(country_group))
         country_candidates = len(candidates)
         country_duplicates = 0
@@ -615,7 +665,9 @@ def _collect_country_batch(
         if len(rows) >= target_rows:
             break
         if country_delay and group_index < len(country_groups) - 1:
-            time.sleep(country_delay)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(country_delay, remaining))
 
     rows.sort(key=lambda row: _country_rank(row, countries))
     countries_attempted = [
@@ -627,6 +679,10 @@ def _collect_country_batch(
     request_meta = {
         "mode": "grouped_ordered_country_batch",
         "target_rows": target_rows,
+        "max_seconds": max_seconds,
+        "time_buffer_seconds": time_buffer,
+        "time_budget_reached": time.monotonic() >= deadline,
+        "elapsed_seconds": round(time.monotonic() - started, 2),
         "country_group_size": country_group_size,
         "countries_configured": countries,
         "countries_attempted": countries_attempted,
