@@ -30,7 +30,8 @@ PUBMED_REQUEST_TIMEOUT=20
 EVIDENCE_MAX_SECONDS=240
 ABSTRACT_MAX_CHARS=3000
 TRANSLATE_ABSTRACTS=true
-GOOGLE_TRANSLATION_SECRET_OCID=<OCI Vault secret OCID>
+GOOGLE_TRANSLATION_SECRET_OCIDS=<OCI Vault secret OCID API 3>,<OCI Vault secret OCID API 4>
+# GOOGLE_TRANSLATION_SECRET_OCID remains supported for one key.
 TRANSLATION_MODEL_ID=gemini-3.5-flash-lite
 TRANSLATION_BATCH_SIZE=2
 TRANSLATION_MAX_TOKENS=5000
@@ -46,21 +47,25 @@ EMBEDDING_REQUEST_TIMEOUT=45
 
 `PUBMED_API_KEY` is optional. Without it, the Function keeps the request rate
 below the NCBI unauthenticated limit. It makes one ESearch call per claim and
-one grouped EFetch call for the returned PMIDs. The Gemini key is read at
-runtime from OCI Vault and is never stored in the image or repository.
+one grouped EFetch call for the returned PMIDs. The Gemini keys are read at
+runtime from OCI Vault and are never stored in the image or repository. The
+two translation keys rotate round-robin and fail over on quota, authentication,
+or rate-limit errors. `translation_key_slot` records the loaded slot used for a
+row.
 
 ## Selection and deduplication
 
 The Function scans all CSVs in `silver/claims/`, chooses the latest complete
 row per `record_id`, and requires `is_claim_eligible=true`, `llm_status=OK`,
-`claim_text` and `pubmed_query_en`. Record IDs already present in
-`silver/evidence/` are skipped. A claim without a query is left pending for a
-later enrichment run.
+`claim_text` and `pubmed_query_en`. Record IDs with a terminal evidence result
+already present in `silver/evidence/` are skipped. Transient PubMed, network,
+timeout, and server errors remain eligible for a later retry. A claim without a
+query is left pending for a later enrichment run.
 
 ## Output
 
 ```text
-silver/evidence/evidence_batch_<run_id>.csv
+silver/evidence/evidence_<run_id>.csv
 ```
 
 The CSV has one row per input claim. `pubmed_results_json` contains up to ten
@@ -70,8 +75,11 @@ translation status, the OCI embedding cosine similarity, and the Spanish
 TF-IDF fallback score. The embedding query uses `claim_text_en` when it is
 available and the document input is the English title plus abstract. This
 keeps the ranking cross-lingually aligned before translation. The scores are
-ranking aids and are not truth decisions. The original English abstract is
-retained for audit.
+ranking aids and are not truth decisions. A value such as `0.3683` is not a
+probability of truth and should not be compared directly with a threshold from
+a different embedding model. Keep the top ten candidates for human review
+until a calibration sample with thesis labels establishes a precision/recall
+threshold. The original English abstract is retained for audit.
 
 `best_cosine_similarity` is the OCI Embed 4 score when the embedding call
 succeeds; `best_embedding_similarity` stores the same value explicitly and
@@ -96,7 +104,7 @@ oci fn function invoke \
   --read-timeout 360
 ```
 
-The migration writes `evidence_translated_batch_<run_id>.csv` in the same
+The migration writes `evidence_translated_<run_id>.csv` in the same
 `silver/evidence/` prefix. It skips rows already translated and leaves English
 evidence intact if the translation quota or network is unavailable.
 

@@ -41,12 +41,17 @@ When OCI Generative AI model quota is unavailable, use the Google provider:
 ```text
 LLM_PROVIDER=google
 LLM_MODEL_ID=gemini-3.5-flash-lite
-GOOGLE_GEMINI_SECRET_OCID=<OCI Vault secret OCID>
+GOOGLE_GEMINI_SECRET_OCIDS=<OCI Vault secret OCID API 1>,<OCI Vault secret OCID API 2>
+# GOOGLE_GEMINI_SECRET_OCID remains supported for one key.
 ```
 
-The secret must contain the Gemini API key as plain text. The Function's
-dynamic group needs permission to read that one secret. The request uses the
+Each secret must contain one Gemini API key as plain text. The Function reads
+both secrets at invocation time, rotates them round-robin and fails over to the
+other project on quota, authentication, or rate-limit errors. The dynamic
+group must be allowed to read both secrets. The request uses the
 `generateContent` endpoint and sends the key in the `x-goog-api-key` header.
+`llm_key_slot` records which loaded slot produced each row without exposing the
+key.
 
 The batch is filled across all CSVs in `silver/body/`, in deterministic object
 name order. Record IDs already present in `silver/claims/` are skipped, so a
@@ -69,14 +74,14 @@ API call.
 Successful invocations write a CSV such as:
 
 ```text
-silver/claims/claims_batch_run_20261005T000000Z_ab12cd34.csv
+silver/claims/claims_run_20261005T000000Z_ab12cd34.csv
 ```
 
 The output keeps the Bronze and body columns and adds `claim_text`,
 `claim_text_en`, `pubmed_query_en`, `query_status`, `query_prompt_version`,
 `is_medical`, `is_claim_eligible`, `claim_type`, `llm_reason`,
 `needs_human_review`, `llm_status`, `llm_error`, `llm_raw_json`, `model_id`,
-`prompt_version`, timestamps, and source object/run identifiers.
+`llm_key_slot`, `prompt_version`, timestamps, and source object/run identifiers.
 
 ## Enriching existing claim CSVs
 
@@ -93,7 +98,7 @@ oci fn function invoke \
 ```
 
 This mode processes up to `LLM_BATCH_SIZE` existing eligible claims per call
-and writes `claims_enriched_batch_<run_id>.csv` in the same prefix. It is
+and writes `claims_query_enriched_<run_id>.csv` in the same prefix. It is
 idempotent: rows whose `query_status` is already `OK` are not enriched again.
 
 ## Manual invocation

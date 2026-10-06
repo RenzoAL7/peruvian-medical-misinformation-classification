@@ -36,17 +36,18 @@ the 300-second OCI Functions limit. If pages are slow, the function writes the
 rows completed before the internal deadline and the remaining Bronze rows stay
 pending for the next invocation.
 
-The function reads all existing Silver CSVs and skips every `record_id` already
-attempted there. This prevents repeated requests to blocked or paywalled sites.
-The output keeps those errors with `extraction_status` so they remain auditable;
-a later explicit retry mode can be added without changing Bronze.
+The function reads all existing Silver CSVs and skips `record_id` values with a
+terminal result. This prevents repeated requests to blocked or paywalled sites
+while allowing timeouts, connection failures, throttling, and server errors to
+retry on a later scheduled run. The output keeps every attempt with
+`extraction_status` so the decision remains auditable.
 
 ## Silver output
 
 Each invocation that processes at least one row writes:
 
 ```text
-silver/body_batch_run_20261005T000000Z_ab12cd34.csv
+silver/body/body_run_20261005T000000Z_ab12cd34.csv
 ```
 
 The output retains the Bronze columns and adds:

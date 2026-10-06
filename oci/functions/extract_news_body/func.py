@@ -166,18 +166,32 @@ def _existing_silver_ids(
     bucket: str,
     prefix: str,
 ) -> set[str]:
-    """Return record_ids already attempted in Silver.
+    """Return record_ids with terminal body results.
 
-    Every attempted row is retained, including an extraction error. This
-    prevents repeated runs from hammering a publisher. A future retry mode can
-    explicitly select error rows without changing the default behavior.
+    Successful and permanently unusable URLs are kept out of later batches.
+    Timeouts, connection failures, throttling, and server errors remain
+    eligible for a later scheduled retry.
     """
+
+    def terminal(row: dict[str, str]) -> bool:
+        status = row.get("extraction_status", "").strip().upper()
+        if status in {"OK", "CUERPO_INSUFICIENTE"}:
+            return True
+        if status == "HTTP_ERROR":
+            try:
+                http_status = int(row.get("http_status", "0"))
+            except ValueError:
+                http_status = 0
+            return http_status not in RETRYABLE_HTTP_STATUS
+        if status == "URL_ERROR":
+            return "url must use" in row.get("extraction_error", "").lower()
+        return status == "ERROR" and bool(row.get("extraction_error", "").strip())
 
     record_ids: set[str] = set()
     for object_name in _list_csv_objects(client, namespace, bucket, prefix):
         for row in _read_csv_object(client, namespace, bucket, object_name):
             record_id = row.get("record_id", "").strip()
-            if record_id:
+            if record_id and terminal(row):
                 record_ids.add(record_id)
     return record_ids
 
@@ -399,7 +413,7 @@ def _write_silver(
     writer = csv.DictWriter(csv_buffer, fieldnames=SILVER_FIELDS, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
-    object_name = f"{prefix.strip('/')}/body_batch_{run_id}.csv"
+    object_name = f"{prefix.strip('/')}/body_{run_id}.csv"
     client.put_object(
         namespace_name=namespace,
         bucket_name=bucket,

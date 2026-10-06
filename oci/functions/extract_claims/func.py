@@ -81,6 +81,7 @@ CLAIM_FIELDS = [
     "llm_error",
     "llm_raw_json",
     "model_id",
+    "llm_key_slot",
     "prompt_version",
     "llm_processed_at",
     "source_silver_object",
@@ -160,6 +161,63 @@ def _vault_secret_value(secret_id: str) -> str:
     if not value:
         raise RuntimeError("The configured Vault secret is empty")
     return value
+
+
+def _secret_ids(list_name: str, legacy_name: str) -> list[str]:
+    """Return deduplicated Vault secret OCIDs from a CSV config value."""
+
+    configured = os.getenv(list_name, "").strip()
+    if configured:
+        values = [value.strip() for value in configured.split(",") if value.strip()]
+    else:
+        legacy = os.getenv(legacy_name, "").strip()
+        values = [legacy] if legacy else []
+    return list(dict.fromkeys(values))
+
+
+def _google_key_switchable(error: Exception) -> bool:
+    """Whether another project key can plausibly recover this Gemini call."""
+
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "http 401",
+            "http 403",
+            "http 429",
+            "quota",
+            "rate limit",
+            "api key",
+            "permission",
+            "network error",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "service unavailable",
+        )
+    )
+
+
+def _call_with_google_key_failover(
+    api_keys: list[str],
+    start_index: int,
+    operation: Any,
+) -> tuple[Any, int]:
+    """Run one request and fail over to the next project key on quota/auth errors."""
+
+    if not api_keys:
+        raise RuntimeError("No usable Google Gemini API key was loaded")
+    last_error: Exception | None = None
+    for offset in range(len(api_keys)):
+        slot = (start_index + offset) % len(api_keys)
+        try:
+            return operation(api_keys[slot]), slot
+        except Exception as exc:  # noqa: BLE001 - try another configured project
+            last_error = exc
+            if offset == len(api_keys) - 1 or not _google_key_switchable(exc):
+                raise
+            LOGGER.warning("Gemini key slot %s failed; trying the next slot", slot + 1)
+    raise RuntimeError(f"All Gemini key slots failed: {last_error}") from last_error
 
 
 def _list_csv_objects(client: Any, namespace: str, bucket: str, prefix: str) -> list[str]:
@@ -775,6 +833,7 @@ def _output_row(
     run_id: str,
     model_id: str,
     status: str,
+    key_slot: str = "",
     error: str = "",
 ) -> dict[str, str]:
     output = {field: source_row.get(field, "") for field in BRONZE_FIELDS + BODY_FIELDS}
@@ -785,6 +844,7 @@ def _output_row(
             "llm_error": error[:1000],
             "llm_raw_json": raw_json[:8000],
             "model_id": model_id,
+            "llm_key_slot": key_slot,
             "prompt_version": PROMPT_VERSION,
             "llm_processed_at": datetime.now(timezone.utc).isoformat(),
             "source_silver_object": source_row.get("source_silver_object", ""),
@@ -802,6 +862,7 @@ def _query_output_row(
     raw_json: str,
     run_id: str,
     model_id: str,
+    key_slot: str = "",
 ) -> dict[str, str]:
     output = {field: source_row.get(field, "") for field in OUTPUT_FIELDS}
     output.update(query)
@@ -809,6 +870,7 @@ def _query_output_row(
         {
             "llm_raw_json": raw_json[:8000] or source_row.get("llm_raw_json", "")[:8000],
             "model_id": source_row.get("model_id", model_id) or model_id,
+            "llm_key_slot": key_slot or source_row.get("llm_key_slot", ""),
             "query_prompt_version": QUERY_PROMPT_VERSION,
             "query_enriched_at": datetime.now(timezone.utc).isoformat(),
             "query_enrichment_run_id": run_id,
@@ -853,7 +915,7 @@ def _write_claims(
     prefix: str,
     rows: list[dict[str, str]],
     run_id: str,
-    object_stem: str = "claims_batch",
+    object_stem: str = "claims",
 ) -> str:
     csv_buffer = io.StringIO(newline="")
     writer = csv.DictWriter(csv_buffer, fieldnames=OUTPUT_FIELDS, extrasaction="ignore")
@@ -934,12 +996,26 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         statuses: Counter[str] = Counter()
         last_llm_error = ""
         consecutive_errors = 0
-        google_api_key = ""
+        google_api_keys: list[str] = []
+        google_key_cursor = 0
         llm_requests = 0
         if pending:
             if provider == "google":
-                secret_id = _required_env("GOOGLE_GEMINI_SECRET_OCID")
-                google_api_key = _vault_secret_value(secret_id)
+                secret_ids = _secret_ids("GOOGLE_GEMINI_SECRET_OCIDS", "GOOGLE_GEMINI_SECRET_OCID")
+                if not secret_ids:
+                    raise RuntimeError(
+                        "GOOGLE_GEMINI_SECRET_OCIDS or GOOGLE_GEMINI_SECRET_OCID is required"
+                    )
+                for slot, secret_id in enumerate(secret_ids, start=1):
+                    try:
+                        value = _vault_secret_value(secret_id)
+                    except Exception as exc:  # noqa: BLE001 - keep other project keys usable
+                        LOGGER.warning("Unable to read Gemini secret slot %s: %s", slot, type(exc).__name__)
+                        continue
+                    if value and value not in google_api_keys:
+                        google_api_keys.append(value)
+                if not google_api_keys:
+                    raise RuntimeError("No usable Google Gemini Vault secret was found")
                 llm = None
             else:
                 llm = _generative_ai_client(region, request_timeout)
@@ -948,22 +1024,22 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                     break
                 request_rows = pending[offset : offset + request_batch_size]
                 try:
-                    if mode == "enrich_queries":
-                        batch_results = _call_query_batch(
-                            llm,
-                            request_rows,
-                            model_id,
-                            max_tokens,
-                            temperature,
-                            top_p,
-                            retries,
-                            deadline,
-                            provider=provider,
-                            google_api_key=google_api_key,
-                            request_timeout=request_timeout,
-                        )
-                    else:
-                        batch_results = _call_llm_batch(
+                    def invoke_batch(key: str) -> list[tuple[dict[str, str], dict[str, str], str]]:
+                        if mode == "enrich_queries":
+                            return _call_query_batch(
+                                llm,
+                                request_rows,
+                                model_id,
+                                max_tokens,
+                                temperature,
+                                top_p,
+                                retries,
+                                deadline,
+                                provider=provider,
+                                google_api_key=key,
+                                request_timeout=request_timeout,
+                            )
+                        return _call_llm_batch(
                             llm,
                             request_rows,
                             model_id,
@@ -974,16 +1050,30 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                             retries,
                             deadline,
                             provider=provider,
-                            google_api_key=google_api_key,
+                            google_api_key=key,
                             request_timeout=request_timeout,
                         )
+
+                    if provider == "google":
+                        batch_results, used_slot = _call_with_google_key_failover(
+                            google_api_keys,
+                            google_key_cursor,
+                            invoke_batch,
+                        )
+                        google_key_cursor = (used_slot + 1) % len(google_api_keys)
+                        key_slot = str(used_slot + 1)
+                    else:
+                        batch_results = invoke_batch("")
+                        key_slot = "oci"
                     llm_requests += 1
                     for source_row, claim, raw_json in batch_results:
                         if mode == "enrich_queries":
-                            output_rows.append(_query_output_row(source_row, claim, raw_json, run_id, model_id))
+                            output_rows.append(
+                                _query_output_row(source_row, claim, raw_json, run_id, model_id, key_slot)
+                            )
                         else:
                             output_rows.append(
-                                _output_row(source_row, claim, raw_json, run_id, model_id, "OK")
+                                _output_row(source_row, claim, raw_json, run_id, model_id, "OK", key_slot)
                             )
                     statuses["OK"] += len(batch_results)
                     consecutive_errors = 0
@@ -1013,7 +1103,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 claims_prefix,
                 output_rows,
                 run_id,
-                object_stem="claims_enriched_batch" if mode == "enrich_queries" else "claims_batch",
+                object_stem="claims_query_enriched" if mode == "enrich_queries" else "claims",
             )
         result_status = "ok"
         if statuses.get("ERROR", 0) and not output_rows:
@@ -1034,6 +1124,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "model_id": model_id,
             "llm_provider": provider,
             "llm_requests": str(llm_requests),
+            "llm_key_slots_configured": str(len(google_api_keys)) if provider == "google" else "oci",
             "elapsed_seconds": f"{time.monotonic() - started:.2f}",
             "batch_size": str(batch_size),
             "request_batch_size": str(request_batch_size),

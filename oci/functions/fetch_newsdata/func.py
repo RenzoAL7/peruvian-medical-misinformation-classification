@@ -662,7 +662,9 @@ def _write_bronze(
     prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
     retrieved_at = datetime.now(timezone.utc)
     run_id = f"run_{retrieved_at.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
-    object_name = f"{prefix}/newsdata_batch_{run_id}.csv"
+    # The layer is already encoded by ``prefix``.  Keep the object name short
+    # and stable so a bucket listing is readable across pipeline stages.
+    object_name = f"{prefix}/newsdata_{run_id}.csv"
 
     csv_buffer = io.StringIO(newline="")
     writer = csv.DictWriter(csv_buffer, fieldnames=BRONZE_FIELDS, extrasaction="ignore")

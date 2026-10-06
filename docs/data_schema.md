@@ -21,7 +21,8 @@ Una fila representa una noticia candidata todavía no validada. Se mantienen die
 | `retrieved_at` | Fecha UTC de recuperación. |
 | `country` | Código ISO-2 canónico del país latinoamericano de la fuente, por ejemplo `pe` o `pr`. |
 
-El Colab elimina duplicados dentro de la corrida y vuelve a consultar los `record_id` existentes inmediatamente antes de anexar.
+La Function elimina duplicados dentro de la corrida y vuelve a consultar los
+`record_id` existentes antes de escribir el siguiente lote.
 
 ## Silver
 
@@ -42,9 +43,11 @@ anterior y añade:
 | `claim_text_en` | Traducción fiel usada para buscar literatura biomédica. |
 | `pubmed_query_en` | Consulta PubMed en inglés generada para el claim. |
 | `query_status` | `OK`, `ERROR` o `SKIPPED_NOT_ELIGIBLE`. |
+| `llm_key_slot` | Slot cargado de las claves Gemini 1/2 que produjo la fila; no contiene la clave. |
 | `pubmed_results_json` | Hasta diez artículos candidatos con PMID, abstract original en inglés, traducción al español, URL, similitud de OCI Embed 4 y score TF-IDF auxiliar. |
 | `evidence_status` | `OK`, `NO_RESULTS`, `NO_ABSTRACT` o `ERROR`. |
 | `translation_status` | `OK`, `PARTIAL`, `ERROR`, `NO_ABSTRACTS` o estado de omisión. Un candidato puede marcarse `PARAPHRASED` si Gemini bloquea la traducción literal por recitación. |
+| `translation_key_slot` | Slot cargado de las claves Gemini 3/4 que produjo la traducción; no contiene la clave. |
 | `best_cosine_similarity` | Similitud coseno del mejor candidato según OCI Embed 4; si OCI no está disponible, conserva el fallback TF-IDF; sirve para ordenar, no para etiquetar. |
 | `best_embedding_similarity` | Mejor similitud coseno calculada con `cohere.embed-v4.0`; es un apoyo de ranking y no una etiqueta. |
 | `best_tfidf_similarity` | Mejor similitud TF-IDF entre claim y abstract traducido al español; sirve como score auxiliar. |
@@ -52,12 +55,16 @@ anterior y añade:
 | `embedding_model`, `embedding_query_field` | Modelo usado y campo del claim enviado a Embed 4 (`claim_text_en` o `claim_text`). |
 | `ranking_method` | `oci_cohere_embed_v4` cuando Embed 4 rankea los candidatos; `tfidf_v1_es` si se usa el fallback. |
 | `main_medical_claim` | Afirmación médica principal delimitada manualmente. |
-| `label` | `PENDIENTE`, `RESPALDADA`, `REFUTADA`, `NO_CONCLUYENTE` o `EXCLUIDA`. |
+| `label` | `PENDIENTE`, `RESPALDADA`, `REFUTADA`, `NO_DETERMINABLE` o `EXCLUIDA`. |
 | `evidence_url` | Fuente especializada usada para contrastar la afirmación. |
 | `verification_note` | Explicación breve de por qué la evidencia respalda, refuta o no permite concluir. |
 | `reviewer`, `validation_status` | Responsable y estado `PENDIENTE` o `COMPLETADA`. |
 
-La extracción del cuerpo no asigna una etiqueta. Si el texto no alcanza el mínimo, no se crea una fila en Silver y Bronze cambia a `EXCLUIR_SIN_TEXTO`. Las decisiones médicas y de veracidad siguen siendo humanas y basadas en evidencia.
+La extracción del cuerpo no asigna una etiqueta. Si el texto no alcanza el
+mínimo, `silver/body/` conserva una fila con `CUERPO_INSUFICIENTE` para la
+auditoría y no se crea una fila posterior en `silver/claims/`; Bronze puede
+marcarse como `EXCLUIR_SIN_TEXTO` durante la revisión. Las decisiones médicas
+y de veracidad siguen siendo humanas y basadas en evidencia.
 
 ## Gold
 
@@ -72,7 +79,7 @@ Una fila por `record_id` conserva siete campos: `record_id`, `topic`, `source_na
 ## Artefactos temporales
 
 - `data/00_control/run_registry.csv`: estado y cantidades de cada ejecución local.
-- `data/01_candidates/<run_id>.csv`: salida temporal consumida por el Colab.
+- `data/01_candidates/<run_id>.csv`: salida temporal del recolector local histórico.
 - `reports/runs/<run_id>.json`: temas intentados, resultados por medio, duplicados y límites encontrados.
 
 Estos archivos están ignorados por Git y no constituyen el corpus final.

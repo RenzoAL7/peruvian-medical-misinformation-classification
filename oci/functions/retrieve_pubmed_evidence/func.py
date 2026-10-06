@@ -3,9 +3,10 @@
 The function is deliberately an evidence-retrieval step. It does not decide
 whether a news claim is true or false. It reads up to a small batch of claim
 rows, queries PubMed with ESearch, downloads all returned records in one
-EFetch request, ranks the abstracts with a transparent local TF-IDF cosine
-score, and writes one output row per claim. The top-k PubMed candidates are
-stored as JSON inside that row so the CSV does not expand to one row per paper.
+EFetch request, ranks the English title and abstract with OCI Cohere Embed 4,
+and writes one output row per claim. A transparent Spanish TF-IDF score is
+kept as a diagnostic and fallback. The top-k PubMed candidates are stored as
+JSON inside that row so the CSV does not expand to one row per paper.
 """
 
 from __future__ import annotations
@@ -71,6 +72,7 @@ OUTPUT_FIELDS = [
     "translation_status",
     "translation_error",
     "translation_model",
+    "translation_key_slot",
     "translation_prompt_version",
     "translation_run_id",
     "retrieved_at",
@@ -268,6 +270,63 @@ def _vault_secret_value(secret_id: str) -> str:
     return value
 
 
+def _secret_ids(list_name: str, legacy_name: str) -> list[str]:
+    """Return deduplicated Vault secret OCIDs from a CSV config value."""
+
+    configured = os.getenv(list_name, "").strip()
+    if configured:
+        values = [value.strip() for value in configured.split(",") if value.strip()]
+    else:
+        legacy = os.getenv(legacy_name, "").strip()
+        values = [legacy] if legacy else []
+    return list(dict.fromkeys(values))
+
+
+def _google_key_switchable(error: Exception) -> bool:
+    """Whether another project key can plausibly recover this Gemini call."""
+
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "http 401",
+            "http 403",
+            "http 429",
+            "quota",
+            "rate limit",
+            "api key",
+            "permission",
+            "network error",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "service unavailable",
+        )
+    )
+
+
+def _call_with_google_key_failover(
+    api_keys: list[str],
+    start_index: int,
+    operation: Any,
+) -> tuple[Any, int]:
+    """Run one request and fail over to the next project key on quota/auth errors."""
+
+    if not api_keys:
+        raise RuntimeError("No usable Google Gemini API key was loaded")
+    last_error: Exception | None = None
+    for offset in range(len(api_keys)):
+        slot = (start_index + offset) % len(api_keys)
+        try:
+            return operation(api_keys[slot]), slot
+        except Exception as exc:  # noqa: BLE001 - try another configured project
+            last_error = exc
+            if offset == len(api_keys) - 1 or not _google_key_switchable(exc):
+                raise
+            LOGGER.warning("Gemini translation key slot %s failed; trying the next slot", slot + 1)
+    raise RuntimeError(f"All Gemini translation key slots failed: {last_error}") from last_error
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name, str(default)).strip().lower()
     if value in {"1", "true", "yes", "y", "si", "sí"}:
@@ -365,11 +424,40 @@ def _existing_evidence_ids(
     bucket: str,
     evidence_prefix: str,
 ) -> set[str]:
+    """Return evidence rows that are terminal and should not be retried.
+
+    Transient PubMed or embedding failures are written for auditability but do
+    not block a later scheduled run from retrying the claim.
+    """
+
+    def terminal(row: dict[str, str]) -> bool:
+        status = row.get("evidence_status", "").strip().upper()
+        if status in {"OK", "NO_RESULTS", "NO_ABSTRACT"}:
+            return True
+        if status != "ERROR":
+            return False
+        error = row.get("evidence_error", "").lower()
+        transient = (
+            "http 408",
+            "http 425",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "network error",
+            "time_budget",
+        )
+        return not any(marker in error for marker in transient)
+
     record_ids: set[str] = set()
     for object_name in _list_csv_objects(client, namespace, bucket, evidence_prefix):
         for row in _read_csv_object(client, namespace, bucket, object_name):
             record_id = row.get("record_id", "").strip()
-            if record_id:
+            if record_id and terminal(row):
                 record_ids.add(record_id)
     return record_ids
 
@@ -931,7 +1019,7 @@ def _pending_translation_rows(
 
 def _apply_translations(
     rows: list[dict[str, str]],
-    api_key: str,
+    api_keys: list[str] | str,
     model_id: str,
     batch_size: int,
     max_tokens: int,
@@ -941,9 +1029,27 @@ def _apply_translations(
     enabled: bool,
     configuration_error: str = "",
 ) -> dict[str, Any]:
+    if isinstance(api_keys, str):
+        api_keys = [api_keys] if api_keys else []
+    api_keys = list(api_keys)
+    key_cursor = 0
     stats: Counter[str] = Counter()
+
+    def translate_with_failover(
+        batch_rows: list[dict[str, str]],
+    ) -> tuple[dict[str, dict[str, str]], int]:
+        nonlocal key_cursor
+        translated, used_slot = _call_with_google_key_failover(
+            api_keys,
+            key_cursor,
+            lambda key: _translate_batch(key, model_id, batch_rows, max_tokens, timeout),
+        )
+        key_cursor = (used_slot + 1) % len(api_keys)
+        return translated, used_slot
+
     for row in rows:
         row["translation_model"] = model_id if enabled else ""
+        row["translation_key_slot"] = ""
         row["translation_prompt_version"] = TRANSLATION_PROMPT_VERSION if enabled else ""
         row["translation_run_id"] = run_id
         row.setdefault("translation_error", "")
@@ -965,9 +1071,11 @@ def _apply_translations(
         if not enabled:
             row["translation_status"] = "DISABLED"
             stats["translation_disabled"] += 1
-        elif not api_key:
+        elif not api_keys:
             row["translation_status"] = "NOT_CONFIGURED"
-            row["translation_error"] = configuration_error or "GOOGLE_TRANSLATION_SECRET_OCID is not configured"
+            row["translation_error"] = configuration_error or (
+                "GOOGLE_TRANSLATION_SECRET_OCIDS or GOOGLE_TRANSLATION_SECRET_OCID is not configured"
+            )
             stats["translation_errors"] += 1
         else:
             # A migration may be retrying a row previously marked
@@ -990,9 +1098,10 @@ def _apply_translations(
                 stats["translation_errors"] += 1
             continue
         try:
-            translated = _translate_batch(api_key, model_id, batch, max_tokens, timeout)
+            translated, used_slot = translate_with_failover(batch)
             stats["translation_requests"] += 1
             for row in batch:
+                row["translation_key_slot"] = str(used_slot + 1)
                 mapping = translated.get(row.get("record_id", ""), {})
                 translated_count, missing_count, scored = _apply_translation_mapping(row, mapping)
                 if missing_count:
@@ -1007,8 +1116,9 @@ def _apply_translations(
                 stats["translation_batch_fallbacks"] += 1
             for row in batch:
                 try:
-                    translated = _translate_batch(api_key, model_id, [row], max_tokens, timeout)
+                    translated, used_slot = translate_with_failover([row])
                     stats["translation_requests"] += 1
+                    row["translation_key_slot"] = str(used_slot + 1)
                     mapping = translated.get(row.get("record_id", ""), {})
                     translated_count, missing_count, scored = _apply_translation_mapping(row, mapping)
                     if missing_count:
@@ -1017,13 +1127,15 @@ def _apply_translations(
                     stats["scored_rows"] += int(scored)
                 except Exception:  # noqa: BLE001 - keep row-level audit trail
                     stats["translation_candidate_fallbacks"] += 1
+                    fallback_slot = key_cursor % len(api_keys)
                     mapping, fallback_errors, attempts, paraphrased_pmids = _translate_row_individually(
-                        api_key,
+                        api_keys[fallback_slot],
                         model_id,
                         row,
                         max_tokens,
                         timeout,
                     )
+                    row["translation_key_slot"] = str(fallback_slot + 1)
                     stats["translation_requests"] += attempts
                     translated_count, missing_count, scored = _apply_translation_mapping(
                         row,
@@ -1324,6 +1436,7 @@ def _base_output_row(row: dict[str, str], run_id: str, retrieved_at: str) -> dic
         "translation_status": "PENDING",
         "translation_error": "",
         "translation_model": "",
+        "translation_key_slot": "",
         "translation_prompt_version": "",
         "translation_run_id": run_id,
         "retrieved_at": retrieved_at,
@@ -1337,7 +1450,7 @@ def _write_evidence(
     prefix: str,
     rows: list[dict[str, str]],
     run_id: str,
-    object_stem: str = "evidence_batch",
+    object_stem: str = "evidence",
 ) -> str:
     csv_buffer = io.StringIO(newline="")
     writer = csv.DictWriter(csv_buffer, fieldnames=OUTPUT_FIELDS, extrasaction="ignore")
@@ -1371,7 +1484,10 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         max_seconds = _env_float("EVIDENCE_MAX_SECONDS", 240.0, minimum=30.0)
         abstract_max_chars = _env_int("ABSTRACT_MAX_CHARS", 3000, minimum=500, maximum=10000)
         translate_enabled = _env_bool("TRANSLATE_ABSTRACTS", True)
-        translation_secret_id = os.getenv("GOOGLE_TRANSLATION_SECRET_OCID", "").strip()
+        translation_secret_ids = _secret_ids(
+            "GOOGLE_TRANSLATION_SECRET_OCIDS",
+            "GOOGLE_TRANSLATION_SECRET_OCID",
+        )
         translation_model = os.getenv("TRANSLATION_MODEL_ID", "gemini-3.5-flash-lite").strip()
         translation_batch_size = _env_int("TRANSLATION_BATCH_SIZE", 2, minimum=1, maximum=5)
         translation_max_tokens = _env_int("TRANSLATION_MAX_TOKENS", 5000, minimum=500, maximum=12000)
@@ -1402,15 +1518,26 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         storage = _object_storage_client()
         pubmed_requests = 0
         translation_config_error = ""
-        translation_api_key = ""
+        translation_api_keys: list[str] = []
         if translate_enabled:
-            if not translation_secret_id:
-                translation_config_error = "GOOGLE_TRANSLATION_SECRET_OCID is not configured"
-            else:
+            if not translation_secret_ids:
+                translation_config_error = (
+                    "GOOGLE_TRANSLATION_SECRET_OCIDS or GOOGLE_TRANSLATION_SECRET_OCID is not configured"
+                )
+            for slot, secret_id in enumerate(translation_secret_ids, start=1):
                 try:
-                    translation_api_key = _vault_secret_value(translation_secret_id)
-                except Exception as exc:  # noqa: BLE001 - preserve English evidence
-                    translation_config_error = f"{type(exc).__name__}: {exc}"[:1500]
+                    value = _vault_secret_value(secret_id)
+                except Exception as exc:  # noqa: BLE001 - keep other project keys usable
+                    LOGGER.warning(
+                        "Unable to read translation Gemini secret slot %s: %s",
+                        slot,
+                        type(exc).__name__,
+                    )
+                    continue
+                if value and value not in translation_api_keys:
+                    translation_api_keys.append(value)
+            if translation_secret_ids and not translation_api_keys:
+                translation_config_error = "No usable translation Gemini Vault secret was found"
 
         if mode == "translate_existing":
             pending, selection_meta = _pending_translation_rows(
@@ -1434,7 +1561,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             ]
             translation_stats = _apply_translations(
                 output_rows,
-                translation_api_key,
+                translation_api_keys,
                 translation_model,
                 translation_batch_size,
                 translation_max_tokens,
@@ -1454,7 +1581,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                     evidence_prefix,
                     output_rows,
                     run_id,
-                    object_stem="evidence_translated_batch",
+                    object_stem="evidence_translated",
                 )
             result = {
                 "status": "ok" if not translation_stats.get("translation_errors") else "partial",
@@ -1467,6 +1594,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 "pubmed_requests": "0",
                 "translation": translation_stats,
                 "translation_model": translation_model if translate_enabled else "",
+                "translation_key_slots_configured": str(len(translation_api_keys)) if translate_enabled else "0",
                 "top_k": str(top_k),
                 "batch_size": str(batch_size),
                 "translation_batch_size": str(translation_batch_size),
@@ -1587,7 +1715,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
 
         translation_stats = _apply_translations(
             output_rows,
-            translation_api_key,
+            translation_api_keys,
             translation_model,
             translation_batch_size,
             translation_max_tokens,
@@ -1621,6 +1749,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "pubmed_requests": str(pubmed_requests),
             "translation": translation_stats,
             "translation_model": translation_model if translate_enabled else "",
+            "translation_key_slots_configured": str(len(translation_api_keys)) if translate_enabled else "0",
             "top_k": str(top_k),
             "batch_size": str(batch_size),
             "translation_batch_size": str(translation_batch_size),

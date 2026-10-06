@@ -23,7 +23,7 @@ BRONZE_DEDUP_ENABLED=1
 NEWSDATA_LANGUAGE=es
 NEWSDATA_CATEGORY=health
 NEWSDATA_SIZE=10
-NEWSDATA_MAX_PAGES=8
+NEWSDATA_MAX_PAGES=2
 NEWSDATA_TARGET_ROWS=50
 NEWSDATA_REQUIRE_TARGET_ROWS=0
 NEWSDATA_COUNTRY_GROUP_SIZE=5
@@ -56,11 +56,12 @@ With `BRONZE_DEDUP_ENABLED=1`, each run reads prior CSVs under `bronze/` and
 skips any `record_id` already stored there and also removes duplicates between
 countries in the current run. This prevents the same canonical URL from
 returning in multiple runs while the API's latest feed covers overlapping
-48-hour windows. `NEWSDATA_MAX_PAGES` controls pages per country group;
-`NEWSDATA_COUNTRY_GROUP_SIZE=5` and eight pages mean at most 32 API requests
-for a full 19-country pass. When two Vault keys are configured, groups use the
-keys in round-robin order and fail over to another key if a request fails.
-Each extra page is another API credit. `NEWSDATA_COUNTRY_DELAY` spaces country
+48-hour windows. `NEWSDATA_MAX_PAGES` controls pages per country group. The production value is
+`2`: with `NEWSDATA_COUNTRY_GROUP_SIZE=5`, a full 19-country pass makes at most
+8 NewsData requests (four country groups x two pages), while the function stops
+early as soon as it has 50 new rows. When two Vault keys are configured, groups
+use the keys in round-robin order and fail over to another key if a request
+fails. Each extra page is another API credit. `NEWSDATA_COUNTRY_DELAY` spaces country
 group requests, while `NEWSDATA_PAGE_DELAY` spaces pages within a country group
 and `NEWSDATA_MAX_RETRIES` retries temporary HTTP 429 responses. With
 `NEWSDATA_REQUIRE_TARGET_ROWS=0` writes the available new rows even when the
@@ -74,7 +75,7 @@ and API availability support larger batches.
 The function writes objects like:
 
 ```text
-bronze/newsdata_batch_run_20261004T000000Z_ab12cd34.csv
+bronze/newsdata_20261004T000000Z_ab12cd34.csv
 ```
 
 The CSV columns are:
