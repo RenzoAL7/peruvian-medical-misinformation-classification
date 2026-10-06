@@ -39,10 +39,29 @@ sean `OK`, consulta las tareas que ya existen en el proyecto y solo importa
 registros nuevos. Se puede ejecutar después de cada corrida de evidence. No
 guardes el token, las API keys ni el manifest con datos en Git.
 
+Cada tarea conserva `evidence_text` completo y además crea `evidence_primary`,
+`evidence_additional` y `evidence_count`. La interfaz muestra primero el
+candidato mejor ordenado y deja los demás dentro de un panel desplegable. Si
+ya tienes tareas importadas con la configuración anterior, ejecuta el mismo
+comando con `--refresh-existing` para actualizar solo los datos de las tareas
+correspondientes y conservar sus anotaciones. El importador seguirá
+deduplicando por `record_id`.
+
+```bash
+python3 labelstudio/import_evidence.py \
+  --project-id 1 \
+  --input /ruta/a/evidence_1.csv \
+  --refresh-existing
+```
+
+`--refresh-existing` usa la actualización de datos de la tarea; no borra ni
+crea otra anotación.
+
 ## 3. Anotar
 
-Para cada tarea compara el claim en español con los abstracts, marca
-`supports`, `contradicts` o `unclear`, marca `RESPALDADA`, `REFUTADA`,
+Para cada tarea compara el claim en español con la evidencia principal y abre
+los candidatos adicionales solo cuando sea necesario. Marca `supports`,
+`contradicts` o `unclear`, marca `RESPALDADA`, `REFUTADA`,
 `NO_DETERMINABLE` o `EXCLUIDA`, y escribe una justificación verificable.
 `EXCLUIDA` y `NO_DETERMINABLE` se conservan para auditoría, pero no entran al
 Gold binario de entrenamiento. La decisión humana prevalece sobre la
