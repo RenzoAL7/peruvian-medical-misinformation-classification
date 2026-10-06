@@ -1,84 +1,106 @@
-# Corpus de noticias médicas peruanas
+# Corpus de noticias médicas en español de Latinoamérica
 
-Este repositorio contiene el recolector y las OCI Functions del pipeline cloud del proyecto. Descubre noticias candidatas, conserva su trazabilidad y prepara el cuerpo textual para Silver. No decide si una noticia es médica ni asigna etiquetas de veracidad.
+Este repositorio contiene las OCI Functions y las herramientas de revisión del
+pipeline cloud. Descubre noticias médicas en español de Latinoamérica,
+conserva su trazabilidad y prepara evidencia para revisión humana. No decide
+automáticamente si una noticia es verdadera o falsa.
 
 ## Pipeline OCI en la nube
 
 Las Functions desplegadas en OCI separan las etapas de datos:
 
-1. `fetch-newsdata` consulta NewsData y escribe lotes deduplicados en `bronze/`.
+1. `fetch-newsdata` consulta NewsData por países de Latinoamérica, incluye
+   Puerto Rico (`pr`) y escribe lotes deduplicados en `bronze/`.
 2. `extract-news-body` recorre los CSV Bronze en orden, combina archivos para
    formar lotes de hasta 50 filas pendientes y escribe los cuerpos en `silver/`.
 3. `extract-claims` toma solo cuerpos válidos, genera una afirmación candidata
    en español y añade `claim_text_en` y `pubmed_query_en`. El modo
    `enrich_queries` migra CSV de claims creados antes de esos campos.
 4. `retrieve-pubmed-evidence` consulta PubMed para cada claim elegible, guarda
-   hasta cinco artículos por fila en `silver/evidence/` y calcula una similitud
-   TF-IDF reproducible para ordenar los candidatos.
+   hasta diez artículos por fila en `silver/evidence/`, los ordena con
+   `cohere.embed-v4.0` de OCI y conserva el TF-IDF en español como diagnóstico.
 5. La revisión humana verifica la afirmación y la evidencia, asigna la etiqueta
    binaria y decide qué filas pasan a Gold.
 
 Los artefactos operativos del pipeline se guardan en Object Storage:
-`bronze/`, `silver/body/`, `silver/claims/` y `silver/evidence/`. Los CSV de
-evidencia son candidatos de recuperación, no etiquetas automáticas: que una
-fila tenga `evidence_status=OK` solo significa que PubMed devolvió artículos.
+`bronze/`, `silver/body/`, `silver/claims/` y `silver/evidence/`. Los nombres
+son cortos y uniformes: `newsdata_<run_id>.csv`, `body_<run_id>.csv`,
+`claims_<run_id>.csv` y `evidence_<run_id>.csv`. Los CSV de evidencia son
+candidatos de recuperación, no etiquetas automáticas: `evidence_status=OK`
+solo significa que PubMed devolvió artículos.
 
 La extracción del cuerpo conserva estados `OK`, `CUERPO_INSUFICIENTE` y errores
 HTTP para que una URL bloqueada no desaparezca del registro. El Function deja
 un margen interno antes del límite de 300 segundos y continúa con las filas
 pendientes en la siguiente ejecución.
 
-## Flujo local de referencia
+## Automatización OCI
 
-1. El Colab lee los `record_id` existentes en la pestaña `Bronze` de Google Sheets.
-2. Ejecuta `scripts/01_collect_newsdata_urls.py` y le pasa esos identificadores para evitar repeticiones.
-3. El recolector carga `configs/batch.yaml`, consulta secciones públicas de salud y guarda un CSV temporal de candidatas.
-4. El Colab vuelve a comprobar los identificadores y anexa a `Bronze` únicamente las noticias nuevas.
-5. El investigador revisa manualmente relevancia médica y elegibilidad de la afirmación.
-6. Las Functions de OCI extraen el cuerpo, generan claims y preparan la búsqueda de evidencia.
-7. La revisión humana valida los artículos recuperados y agrega la etiqueta de veracidad.
-8. El Colab o el proceso de revisión reconstruye `Gold` únicamente con noticias validadas, etiquetadas y aprobadas para entrenamiento.
+Resource Scheduler inicia `fetch-newsdata` a las 08:00 y 20:00, hora de Lima.
+OCI Events encadena el proceso cuando aparece un CSV nuevo:
 
-## Medios y método de descubrimiento
+```text
+fetch-newsdata -> bronze/*.csv
+                       |
+                       v
+               extract-news-body -> silver/body/*.csv
+                                      |
+                                      v
+                              extract-claims -> silver/claims/*.csv
+                                                   |
+                                                   v
+                              retrieve-pubmed-evidence -> silver/evidence/*.csv
+```
 
-Cada corrida intenta obtener hasta 12 candidatas textuales desde un conjunto
-amplio de fuentes. Cada fuente aporta como máximo 2 noticias y la selección
-final se hace por rondas, para evitar que un solo portal domine el lote.
+Los tres pasos Silver también tienen una invocación horaria de drenaje. Así,
+body (50), claims (10) y evidence (5) mantienen sus límites de ejecución, pero
+las filas pendientes y los errores transitorios continúan automáticamente en
+la siguiente hora.
 
-| Medio | Sección pública verificada |
-| --- | --- |
-| El Comercio | `bienestar/salud-fisica` |
-| La República | `salud` |
-| Diario Correo | `salud` |
-| Diario Ojo | `salud` |
-| MINSA | `institucion/minsa/noticias` |
-| Gestión | etiqueta `salud` |
-| El Popular | `vida` |
-| Canal N | etiqueta `salud` |
+Las Functions mantienen el estado en los CSV y deduplican por `record_id`. Un
+error temporal de red, PubMed o extracción queda auditado y puede reintentarse
+en una ejecución posterior; un resultado terminal no se vuelve a procesar.
 
-Las páginas se comprobaron con `robots.txt` y acceso real. El recolector acepta
-únicamente enlaces internos descubiertos en esas páginas y exige que el título
-o bajada contenga un término médico y una señal de afirmación contrastable. Las
-candidatas se deduplican por URL canónica y `record_id`.
+## Flujo local histórico (no es el flujo operativo)
 
-MINSA se registra con `source_dataset=archive_minsa_institucional`, porque es
-una fuente institucional y no un medio periodístico. Sus comunicados son
-candidatas útiles, pero no reciben automáticamente la etiqueta de verdadero ni
-reemplazan la validación independiente con evidencia.
+Los scripts y registros de la primera exploración se conservan para
+reproducibilidad. El dataset nuevo se recolecta en OCI y no depende de Colab ni
+de Google Sheets. Si se ejecuta una prueba local, su salida debe mantenerse
+fuera del bucket `mednews-data`.
 
-La configuración vigente no consume créditos de NewsData. La integración se conserva para pruebas futuras y, si se vuelve a habilitar, aplica `video=0`, `removeduplicate=1`, máximo 2 solicitudes por fuente y máximo 4 por corrida para proteger el plan gratuito.
+## Cobertura de NewsData
 
-Una corrida puede devolver menos de 12 candidatas nuevas si las páginas no contienen suficientes artículos que superen los filtros o si las URLs ya existen en `Bronze`. El reporte registra el resultado real; nunca se inventan URLs ni se reutilizan noticias existentes para completar el cupo.
+`fetch-newsdata` solicita `language=es`, `category=health` y una consulta médica
+corta compatible con el límite de 100 caracteres de NewsData. La secuencia
+actual cubre estos 19 códigos de Latinoamérica: `ar`, `bo`, `cl`, `co`, `cr`,
+`cu`, `do`, `ec`, `gt`, `hn`, `mx`, `ni`, `pa`, `pe`, `pr`, `py`, `sv`, `uy` y
+`ve`. España y Guinea Ecuatorial quedan fuera del alcance de este corpus; Puerto
+Rico se mantiene visible como `pr`.
 
-### Frecuencia recomendada
+Cada ejecución intenta hasta 50 noticias nuevas. Usa `size=10` y como máximo dos
+páginas por cada uno de los cuatro grupos de países (ocho solicitudes como tope),
+se detiene al alcanzar el objetivo, ordena el CSV por esa secuencia y deduplica con `record_id` contra todo
+`bronze/`. Si las últimas 48 horas no ofrecen 50 URLs nuevas o la API devuelve
+menos resultados, se guarda el lote real disponible. No se inventan filas ni se
+reutilizan noticias ya almacenadas.
 
-- Ejecutar una corrida de 12 candidatas como máximo una vez cada 24 horas.
-- Si la corrida devuelve pocas noticias nuevas, esperar 48 horas antes de repetirla.
-- `request_delay_seconds: 1.0` solo separa solicitudes consecutivas dentro de
-  una corrida; no obliga a esperar una hora o un día entre ejecuciones.
-- Repetir el Colab inmediatamente suele devolver las mismas portadas y no
-  acelera la construcción del corpus. Para recuperar noticias históricas se
-  debe implementar paginación o rangos de fecha, no aumentar la frecuencia.
+La cobertura geográfica no implica que todos los países tengan una noticia en
+cada corrida: NewsData puede no devolver resultados, repetir fuentes o entregar
+una noticia cuya URL ya existe. `request_meta` conserva países consultados,
+filas candidatas, páginas y slots de API utilizados para auditar cada ejecución.
+
+## Revisión humana y Gold
+
+Después de `silver/evidence/`, importa las filas `evidence_status=OK` a Label
+Studio con [`labelstudio/import_evidence.py`](labelstudio/import_evidence.py).
+El script consulta las tareas existentes y no duplica un `record_id`. Tu amigo
+puede usar el mismo proyecto, revisar la relación `supports/contradicts/unclear`
+y la etiqueta final, y exportar con
+[`labelstudio/export_annotations.py`](labelstudio/export_annotations.py).
+La guía completa está en [`labelstudio/README.md`](labelstudio/README.md).
+
+Solo las filas revisadas por una persona, con evidencia trazable y etiqueta
+binaria final, pasan a Gold y al split de entrenamiento.
 
 ## Archivos del repositorio
 
@@ -86,7 +108,7 @@ Una corrida puede devolver menos de 12 candidatas nuevas si las páginas no cont
 configs/
   batch.yaml                     fuentes, temas y límites de la corrida
 scripts/
-  01_collect_newsdata_urls.py    punto de entrada ejecutado por Colab
+  01_collect_newsdata_urls.py    recolector local histórico
 src/peruvian_medical_misinformation/
   __init__.py                    definición del paquete
   newsdata.py                    recolección, normalización y deduplicación
@@ -100,13 +122,19 @@ docs/
 data/00_control/                 registro temporal de corridas
 data/01_candidates/              CSV temporal de cada corrida
 reports/runs/                    diagnóstico JSON temporal de cada corrida
+labelstudio/
+  config.xml                     interfaz de revisión humana
+  import_evidence.py             importa evidencia sin duplicar
+  export_annotations.py          exporta etiquetas Gold
+  README.md                      guía para el equipo
 ```
 
 Los CSV, reportes, credenciales y cuerpos de noticias no se versionan en Git.
 
 ## Ejecución local opcional
 
-El flujo oficial se ejecuta desde Colab. Estos comandos solo sirven para verificar o probar el recolector localmente.
+El flujo oficial se ejecuta en OCI. Estos comandos sirven para verificar el
+recolector y las herramientas de revisión localmente.
 
 ```bash
 make setup

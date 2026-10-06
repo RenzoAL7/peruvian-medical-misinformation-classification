@@ -1,0 +1,28 @@
+<View>
+  <Header value="Revisión de evidencia médica" />
+  <Text name="record" value="Registro: $record_id" />
+  <Text name="country" value="País: $country" />
+  <Text name="source" value="Fuente: $source_name" />
+  <Text name="title" value="Título: $title" />
+  <Text name="claim" value="Claim: $claim_text" />
+  <Text name="query" value="Consulta PubMed (inglés): $pubmed_query_en" />
+  <Text name="evidence" value="$evidence_text" />
+
+  <Header value="Relación entre el claim y la evidencia" />
+  <Choices name="evidence_relation" toName="claim" choice="single-radio" required="true">
+    <Choice value="supports" />
+    <Choice value="contradicts" />
+    <Choice value="unclear" />
+  </Choices>
+
+  <Header value="Etiqueta final de la noticia" />
+  <Choices name="final_label" toName="claim" choice="single-radio" required="true">
+    <Choice value="RESPALDADA" />
+    <Choice value="REFUTADA" />
+    <Choice value="NO_DETERMINABLE" />
+    <Choice value="EXCLUIDA" />
+  </Choices>
+
+  <Header value="Justificación" />
+  <TextArea name="verification_note" toName="claim" required="true" maxSubmissions="1" />
+</View>
