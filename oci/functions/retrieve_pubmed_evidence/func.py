@@ -38,6 +38,7 @@ LOGGER.setLevel(logging.INFO)
 
 PUBMED_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 COSINE_METHOD = "tfidf_v1_es"
+EMBEDDING_METHOD = "oci_cohere_embed_v4"
 TRANSLATION_PROMPT_VERSION = "pubmed-abstract-es-v1"
 
 OUTPUT_FIELDS = [
@@ -56,11 +57,17 @@ OUTPUT_FIELDS = [
     "pubmed_result_count",
     "best_pmid",
     "best_cosine_similarity",
+    "best_embedding_similarity",
+    "best_tfidf_similarity",
     "pubmed_results_json",
     "source_claims_object",
     "claim_run_id",
     "evidence_run_id",
     "cosine_method",
+    "ranking_method",
+    "embedding_model",
+    "embedding_status",
+    "embedding_query_field",
     "translation_status",
     "translation_error",
     "translation_model",
@@ -102,6 +109,143 @@ def _env_float(name: str, default: float, minimum: float | None = None) -> float
 def _object_storage_client() -> Any:
     signer = oci.auth.signers.get_resource_principals_signer()
     return oci.object_storage.ObjectStorageClient(config={}, signer=signer)
+
+
+def _generative_ai_client(region: str, timeout: float) -> Any:
+    """Create an OCI Generative AI Inference client with the Function identity."""
+
+    signer = oci.auth.signers.get_resource_principals_signer()
+    endpoint = os.getenv(
+        "GENAI_INFERENCE_ENDPOINT",
+        f"https://inference.generativeai.{region}.oci.oraclecloud.com",
+    ).strip()
+    return oci.generative_ai_inference.GenerativeAiInferenceClient(
+        config={"region": region},
+        signer=signer,
+        service_endpoint=endpoint,
+        retry_strategy=oci.retry.NoneRetryStrategy(),
+        timeout=(5, max(5, int(timeout))),
+    )
+
+
+def _plain_value(value: Any) -> Any:
+    """Convert OCI SDK model objects to JSON-like values defensively."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _plain_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_value(item) for item in value]
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return _plain_value(to_dict())
+        except Exception:  # noqa: BLE001 - keep response parsing best effort
+            pass
+    if hasattr(value, "__dict__"):
+        return {
+            str(key): _plain_value(item)
+            for key, item in vars(value).items()
+            if not str(key).startswith("_")
+        }
+    return value
+
+
+def _embedding_values(value: Any) -> list[float]:
+    """Read a float vector from the different OCI SDK response shapes."""
+
+    value = _plain_value(value)
+    if isinstance(value, list) and all(isinstance(item, (int, float)) for item in value):
+        return [float(item) for item in value]
+    if isinstance(value, dict):
+        for key in ("values", "embedding", "float", "float_embedding"):
+            if key in value:
+                vector = _embedding_values(value[key])
+                if vector:
+                    return vector
+    return []
+
+
+def _embed_texts(
+    client: Any,
+    texts: list[str],
+    compartment_id: str,
+    model_id: str,
+    input_type: str,
+    output_dimensions: int,
+    timeout: float,
+) -> list[list[float]]:
+    """Embed a batch with OCI Cohere Embed 4 and return one vector per input."""
+
+    if not texts:
+        return []
+    models = oci.generative_ai_inference.models
+    serving_mode = models.OnDemandServingMode(model_id=model_id)
+    details_kwargs: dict[str, Any] = {
+        "compartment_id": compartment_id,
+        "serving_mode": serving_mode,
+        "inputs": texts,
+        "input_type": input_type,
+        "output_dimensions": output_dimensions,
+        "embedding_types": ["float"],
+        "truncate": "END",
+    }
+    try:
+        details = models.EmbedTextDetails(**details_kwargs)
+    except TypeError:
+        # Older SDK builds used the Embed 4 `embed_contents` shape instead of
+        # accepting `inputs`. Keep the fallback so a base image with a recent
+        # but slightly different SDK remains deployable.
+        content_model = getattr(models, "EmbedContent", None) or getattr(
+            models, "EmbedTextContent", None
+        )
+        if content_model is None:
+            raise
+        details_kwargs.pop("inputs", None)
+        details_kwargs["embed_contents"] = [content_model(text=text) for text in texts]
+        details = models.EmbedTextDetails(**details_kwargs)
+
+    result = client.embed_text(
+        embed_text_details=details,
+        retry_strategy=oci.retry.NoneRetryStrategy(),
+    )
+    data_object = getattr(result, "data", result)
+    data = _plain_value(data_object)
+    # OCI SDK 2.187 exposes Embed 4 vectors through model attributes.  The
+    # JSON-compatible conversion intentionally omits the SDK's private
+    # backing fields, so inspect the typed object before using the fallback
+    # dictionary shape.
+    raw_embeddings = getattr(data_object, "embeddings", None)
+    if not isinstance(raw_embeddings, list) or not raw_embeddings:
+        embeddings_by_type = getattr(data_object, "embeddings_by_type", None)
+        if isinstance(embeddings_by_type, dict):
+            raw_embeddings = embeddings_by_type.get("float")
+    if (not isinstance(raw_embeddings, list) or not raw_embeddings) and isinstance(data, dict):
+        raw_embeddings = data.get("embeddings")
+        if (not isinstance(raw_embeddings, list) or not raw_embeddings):
+            embeddings_by_type = data.get("embeddings_by_type")
+            if isinstance(embeddings_by_type, dict):
+                raw_embeddings = embeddings_by_type.get("float")
+    if not isinstance(raw_embeddings, list):
+        raise RuntimeError("OCI Embed 4 returned no embeddings")
+    vectors = [_embedding_values(item) for item in raw_embeddings]
+    if len(vectors) != len(texts) or any(not vector for vector in vectors):
+        raise RuntimeError(
+            f"OCI Embed 4 returned {len(vectors)} valid vectors for {len(texts)} inputs"
+        )
+    return vectors
+
+
+def _vector_cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    numerator = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return numerator / (left_norm * right_norm)
 
 
 def _vault_secret_value(secret_id: str) -> str:
@@ -653,30 +797,65 @@ def _translate_row_individually(
 
 def _rerank_candidates(row: dict[str, str]) -> int:
     candidates = _candidate_list(row)
+    embedding_scored = any(
+        candidate.get("embedding_similarity") is not None for candidate in candidates
+    )
     for candidate in candidates:
         abstract_es = str(candidate.get("abstract_es", "") or "").strip()
         if abstract_es:
-            candidate["cosine_similarity"] = round(
+            candidate["tfidf_cosine_similarity"] = round(
                 _cosine_similarity(row.get("claim_text", ""), abstract_es),
                 4,
             )
         else:
-            candidate["cosine_similarity"] = None
+            candidate["tfidf_cosine_similarity"] = None
+        # Keep the original field for compatibility with previously written
+        # evidence CSVs; it now represents the transparent Spanish TF-IDF
+        # score while `embedding_similarity` is the OCI ranking score.
+        candidate["cosine_similarity"] = candidate.get("tfidf_cosine_similarity")
     candidates.sort(
         key=lambda item: (
-            -(float(item["cosine_similarity"]) if item.get("cosine_similarity") is not None else -1.0),
+            -(
+                float(item["embedding_similarity"])
+                if embedding_scored and item.get("embedding_similarity") is not None
+                else float(item["cosine_similarity"])
+                if item.get("cosine_similarity") is not None
+                else -1.0
+            ),
+            -(
+                float(item["cosine_similarity"])
+                if item.get("cosine_similarity") is not None
+                else -1.0
+            ),
             int(item.get("pubmed_rank", 0)),
         )
     )
     row["pubmed_results_json"] = json.dumps(candidates, ensure_ascii=False)
-    scored = [item for item in candidates if item.get("cosine_similarity") is not None]
-    row["cosine_method"] = COSINE_METHOD if scored else row.get("cosine_method", "")
+    tfidf_scored = [item for item in candidates if item.get("cosine_similarity") is not None]
+    embedding_candidates = [
+        item for item in candidates if item.get("embedding_similarity") is not None
+    ]
+    if tfidf_scored:
+        row["best_tfidf_similarity"] = str(
+            max(float(item["cosine_similarity"]) for item in tfidf_scored)
+        )
+    else:
+        row["best_tfidf_similarity"] = ""
+    scored = embedding_candidates or tfidf_scored
+    row["cosine_method"] = EMBEDDING_METHOD if embedding_candidates else COSINE_METHOD if tfidf_scored else row.get("cosine_method", "")
+    row["ranking_method"] = EMBEDDING_METHOD if embedding_candidates else COSINE_METHOD if tfidf_scored else row.get("ranking_method", "")
     if scored:
-        row["best_pmid"] = str(scored[0].get("pmid", ""))
-        row["best_cosine_similarity"] = str(scored[0].get("cosine_similarity", ""))
+        row["best_pmid"] = str(candidates[0].get("pmid", ""))
+        if embedding_candidates:
+            row["best_embedding_similarity"] = str(candidates[0].get("embedding_similarity", ""))
+            row["best_cosine_similarity"] = row["best_embedding_similarity"]
+        else:
+            row["best_embedding_similarity"] = ""
+            row["best_cosine_similarity"] = str(candidates[0].get("cosine_similarity", ""))
     else:
         row["best_pmid"] = ""
         row["best_cosine_similarity"] = ""
+        row["best_embedding_similarity"] = ""
     return len(scored)
 
 
@@ -989,9 +1168,129 @@ def _candidate_results(
                 "pubmed_rank": pubmed_rank,
                 "translation_status": "PENDING",
                 "cosine_similarity": None,
+                "tfidf_cosine_similarity": None,
+                "embedding_similarity": None,
             }
         )
     return candidates[:top_k]
+
+
+def _apply_embeddings(
+    rows: list[dict[str, str]],
+    client: Any,
+    compartment_id: str,
+    model_id: str,
+    output_dimensions: int,
+    max_chars: int,
+    timeout: float,
+    deadline: float,
+) -> dict[str, Any]:
+    """Rank each PubMed candidate list with one query and one document batch."""
+
+    stats: Counter[str] = Counter()
+    eligible: list[tuple[dict[str, str], list[dict[str, Any]]]] = []
+    for row in rows:
+        row["embedding_model"] = model_id
+        row["embedding_query_field"] = "claim_text_en" if row.get("claim_text_en", "").strip() else "claim_text"
+        if row.get("evidence_status", "").strip().upper() != "OK":
+            row["embedding_status"] = "SKIPPED_NO_EVIDENCE"
+            continue
+        try:
+            candidates = _candidate_list(row)
+        except ValueError as exc:
+            row["embedding_status"] = "ERROR"
+            row["evidence_error"] = str(exc)[:1500]
+            stats["embedding_errors"] += 1
+            continue
+        if not candidates:
+            row["embedding_status"] = "NO_CANDIDATES"
+            continue
+        eligible.append((row, candidates))
+
+    if not eligible:
+        return {"status": "no_candidates", **dict(stats)}
+    if time.monotonic() >= deadline:
+        for row, _ in eligible:
+            row["embedding_status"] = "TIME_BUDGET"
+        stats["embedding_errors"] += len(eligible)
+        return {"status": "time_budget", **dict(stats)}
+
+    query_texts = [
+        (row.get("claim_text_en", "") or row.get("claim_text", "")).strip()[:max_chars]
+        for row, _ in eligible
+    ]
+    document_map: list[tuple[dict[str, str], dict[str, Any]]] = []
+    document_texts: list[str] = []
+    for row, candidates in eligible:
+        for candidate in candidates:
+            document_map.append((row, candidate))
+            document_texts.append(
+                (
+                    f"{str(candidate.get('title', '') or '').strip()}\n"
+                    f"{str(candidate.get('abstract_excerpt', '') or '').strip()}"
+                ).strip()[:max_chars]
+            )
+
+    try:
+        query_vectors = _embed_texts(
+            client,
+            query_texts,
+            compartment_id,
+            model_id,
+            "SEARCH_QUERY",
+            output_dimensions,
+            timeout,
+        )
+        stats["embedding_query_requests"] += 1
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Embedding time budget reached before document batch")
+        document_vectors = _embed_texts(
+            client,
+            document_texts,
+            compartment_id,
+            model_id,
+            "SEARCH_DOCUMENT",
+            output_dimensions,
+            timeout,
+        )
+        stats["embedding_document_requests"] += 1
+    except Exception as exc:  # noqa: BLE001 - keep TF-IDF fallback available
+        detail = f"{type(exc).__name__}: {exc}"[:1500]
+        for row, _ in eligible:
+            row["embedding_status"] = "ERROR"
+            row["evidence_error"] = detail
+        stats["embedding_errors"] += len(eligible)
+        return {"status": "error", "error": detail, **dict(stats)}
+
+    query_by_record = {
+        row.get("record_id", ""): vector
+        for (row, _), vector in zip(eligible, query_vectors)
+    }
+    for (row, candidate), document_vector in zip(document_map, document_vectors):
+        query_vector = query_by_record.get(row.get("record_id", ""), [])
+        candidate["embedding_similarity"] = round(
+            _vector_cosine_similarity(query_vector, document_vector),
+            6,
+        )
+
+    for row, candidates in eligible:
+        candidates.sort(
+            key=lambda item: (
+                -float(item.get("embedding_similarity", -1.0)),
+                int(item.get("pubmed_rank", 0)),
+            )
+        )
+        row["pubmed_results_json"] = json.dumps(candidates, ensure_ascii=False)
+        row["embedding_status"] = "OK"
+        row["ranking_method"] = EMBEDDING_METHOD
+        if candidates and candidates[0].get("embedding_similarity") is not None:
+            row["best_embedding_similarity"] = str(candidates[0]["embedding_similarity"])
+            row["best_cosine_similarity"] = str(candidates[0]["embedding_similarity"])
+            row["cosine_method"] = EMBEDDING_METHOD
+        stats["rows_ranked"] += 1
+        stats["candidates_ranked"] += len(candidates)
+    stats["embedding_inputs"] = len(query_texts) + len(document_texts)
+    return {"status": "ok", "model": model_id, **dict(stats)}
 
 
 def _base_output_row(row: dict[str, str], run_id: str, retrieved_at: str) -> dict[str, str]:
@@ -1011,11 +1310,17 @@ def _base_output_row(row: dict[str, str], run_id: str, retrieved_at: str) -> dic
         "pubmed_result_count": "0",
         "best_pmid": "",
         "best_cosine_similarity": "",
+        "best_embedding_similarity": "",
+        "best_tfidf_similarity": "",
         "pubmed_results_json": "[]",
         "source_claims_object": row.get("source_claims_object", ""),
         "claim_run_id": row.get("claim_run_id", ""),
         "evidence_run_id": run_id,
         "cosine_method": COSINE_METHOD,
+        "ranking_method": "",
+        "embedding_model": "",
+        "embedding_status": "PENDING",
+        "embedding_query_field": "",
         "translation_status": "PENDING",
         "translation_error": "",
         "translation_model": "",
@@ -1059,8 +1364,8 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         bucket = _required_env("OBJECT_STORAGE_BUCKET")
         claims_prefix = os.getenv("SILVER_CLAIMS_PREFIX", "silver/claims").strip("/")
         evidence_prefix = os.getenv("SILVER_EVIDENCE_PREFIX", "silver/evidence").strip("/")
-        batch_size = _env_int("EVIDENCE_BATCH_SIZE", 10, minimum=1, maximum=50)
-        top_k = _env_int("PUBMED_TOP_K", 5, minimum=1, maximum=20)
+        batch_size = _env_int("EVIDENCE_BATCH_SIZE", 5, minimum=1, maximum=50)
+        top_k = _env_int("PUBMED_TOP_K", 10, minimum=1, maximum=20)
         request_delay = _env_float("PUBMED_REQUEST_DELAY", 0.4, minimum=0.34)
         request_timeout = _env_float("PUBMED_REQUEST_TIMEOUT", 20.0, minimum=5.0)
         max_seconds = _env_float("EVIDENCE_MAX_SECONDS", 240.0, minimum=30.0)
@@ -1071,6 +1376,13 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         translation_batch_size = _env_int("TRANSLATION_BATCH_SIZE", 2, minimum=1, maximum=5)
         translation_max_tokens = _env_int("TRANSLATION_MAX_TOKENS", 5000, minimum=500, maximum=12000)
         translation_timeout = _env_float("TRANSLATION_REQUEST_TIMEOUT", 30.0, minimum=5.0)
+        embeddings_enabled = _env_bool("EMBEDDINGS_ENABLED", True)
+        embedding_model = os.getenv("EMBEDDING_MODEL_ID", "cohere.embed-v4.0").strip()
+        embedding_region = os.getenv("EMBEDDING_REGION", "us-ashburn-1").strip()
+        embedding_compartment_id = os.getenv("GENAI_COMPARTMENT_ID", "").strip()
+        embedding_dimensions = _env_int("EMBEDDING_OUTPUT_DIMENSIONS", 512, minimum=256, maximum=1536)
+        embedding_max_chars = _env_int("EMBEDDING_MAX_CHARS", 6000, minimum=500, maximum=20000)
+        embedding_timeout = _env_float("EMBEDDING_REQUEST_TIMEOUT", 45.0, minimum=5.0)
         tool = os.getenv("PUBMED_TOOL", "mednews-thesis").strip() or "mednews-thesis"
         email = _required_env("PUBMED_EMAIL")
         api_key = os.getenv("PUBMED_API_KEY", "").strip()
@@ -1159,6 +1471,9 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 "batch_size": str(batch_size),
                 "translation_batch_size": str(translation_batch_size),
                 "cosine_method": COSINE_METHOD,
+                "ranking_method": COSINE_METHOD,
+                "embedding_model": embedding_model if embeddings_enabled else "",
+                "embedding_status": "not_used_in_translate_existing",
                 "elapsed_seconds": f"{time.monotonic() - started:.2f}",
                 "scan": scan_meta,
                 "selection": selection_meta,
@@ -1233,6 +1548,43 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                     output["evidence_status"] = "OK"
             output_rows.append(output)
 
+        embedding_stats: dict[str, Any] = {
+            "status": "disabled" if not embeddings_enabled else "not_run",
+            "model": embedding_model if embeddings_enabled else "",
+        }
+        if embeddings_enabled and any(
+            row.get("evidence_status", "").strip().upper() == "OK" for row in output_rows
+        ):
+            if not embedding_compartment_id:
+                detail = "GENAI_COMPARTMENT_ID is not configured"
+                embedding_stats = {"status": "configuration_error", "error": detail}
+                for row in output_rows:
+                    if row.get("evidence_status", "").strip().upper() == "OK":
+                        row["embedding_status"] = "ERROR"
+                        row["embedding_model"] = embedding_model
+                        row["evidence_error"] = detail
+            else:
+                try:
+                    embedding_client = _generative_ai_client(embedding_region, embedding_timeout)
+                    embedding_stats = _apply_embeddings(
+                        output_rows,
+                        embedding_client,
+                        embedding_compartment_id,
+                        embedding_model,
+                        embedding_dimensions,
+                        embedding_max_chars,
+                        embedding_timeout,
+                        deadline,
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep TF-IDF/Gemini fallback usable
+                    detail = f"{type(exc).__name__}: {exc}"[:1500]
+                    embedding_stats = {"status": "error", "error": detail}
+                    for row in output_rows:
+                        if row.get("evidence_status", "").strip().upper() == "OK":
+                            row["embedding_status"] = "ERROR"
+                            row["embedding_model"] = embedding_model
+                            row["evidence_error"] = detail
+
         translation_stats = _apply_translations(
             output_rows,
             translation_api_key,
@@ -1272,7 +1624,19 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "top_k": str(top_k),
             "batch_size": str(batch_size),
             "translation_batch_size": str(translation_batch_size),
-            "cosine_method": COSINE_METHOD,
+            "cosine_method": (
+                EMBEDDING_METHOD
+                if embedding_stats.get("status") == "ok"
+                else COSINE_METHOD
+            ),
+            "ranking_method": (
+                EMBEDDING_METHOD
+                if embedding_stats.get("status") == "ok"
+                else COSINE_METHOD
+            ),
+            "embedding_model": embedding_model if embeddings_enabled else "",
+            "embedding_dimensions": str(embedding_dimensions) if embeddings_enabled else "",
+            "embedding": embedding_stats,
             "elapsed_seconds": f"{time.monotonic() - started:.2f}",
             "scan": scan_meta,
             "selection": selection_meta,

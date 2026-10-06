@@ -3,9 +3,11 @@
 First OCI Function in the thesis pipeline. It reads the NewsData API key from
 OCI Vault, requests Spanish health news country by country in a fixed order,
 and writes one deduplicated CSV per run to the flat `bronze/` prefix in Object
-Storage. The CSV follows the Bronze columns used by the thesis spreadsheet and
-includes the publisher country. It can rotate across multiple Vault secrets so
-one exhausted or unavailable NewsData key does not stop the batch.
+Storage. The collection scope is Spanish-speaking Latin America, including
+Puerto Rico (`pr`) and excluding Spain and Equatorial Guinea. The CSV follows
+the Bronze columns used by the thesis spreadsheet and includes the canonical
+ISO-2 publisher country. It can rotate across multiple Vault secrets so one
+exhausted or unavailable NewsData key does not stop the batch.
 
 ## Required function configuration
 
@@ -30,7 +32,7 @@ NEWSDATA_PAGE_DELAY=1
 NEWSDATA_MAX_RETRIES=2
 NEWSDATA_REMOVEDUPLICATE=1
 NEWSDATA_VIDEO=0
-NEWSDATA_COUNTRY_SEQUENCE=ar,bo,cl,co,cr,cu,do,ec,es,gt,gq,hn,mx,ni,pa,pe,pr,py,sv,uy,ve
+NEWSDATA_COUNTRY_SEQUENCE=ar,bo,cl,co,cr,cu,do,ec,gt,hn,mx,ni,pa,pe,pr,py,sv,uy,ve
 NEWSDATA_QUERY=(salud OR medicina OR médico OR enfermedad OR vacuna OR tratamiento OR cáncer OR diabetes)
 ```
 
@@ -39,8 +41,11 @@ splits `NEWSDATA_COUNTRY_SEQUENCE` into groups of up to five countries (the
 NewsData limit), requests each group in order, and sorts the resulting rows
 back into the configured country order before writing the CSV. It appends new
 rows until `NEWSDATA_TARGET_ROWS` is reached. Puerto Rico (`pr`) is
-intentionally included as a separate territory. The order restarts at `ar` on
-the next invocation; no cursor or state JSON is needed.
+intentionally included as a separate territory. The function rejects a
+configuration containing a non-LATAM code and filters the API response again,
+so an article reported with a country outside the requested group cannot enter
+the Bronze CSV. The order restarts at `ar` on the next invocation; no cursor or
+state JSON is needed.
 
 The default medical query includes general terms such as `salud`, `médico`,
 `medicina`, and `enfermedad` in addition to specific terms such as `cáncer`,
@@ -52,8 +57,8 @@ skips any `record_id` already stored there and also removes duplicates between
 countries in the current run. This prevents the same canonical URL from
 returning in multiple runs while the API's latest feed covers overlapping
 48-hour windows. `NEWSDATA_MAX_PAGES` controls pages per country group;
-`NEWSDATA_COUNTRY_GROUP_SIZE=5` and eight pages mean at most 40 API requests
-for a full 21-country pass. When two Vault keys are configured, groups use the
+`NEWSDATA_COUNTRY_GROUP_SIZE=5` and eight pages mean at most 32 API requests
+for a full 19-country pass. When two Vault keys are configured, groups use the
 keys in round-robin order and fail over to another key if a request fails.
 Each extra page is another API credit. `NEWSDATA_COUNTRY_DELAY` spaces country
 group requests, while `NEWSDATA_PAGE_DELAY` spaces pages within a country group

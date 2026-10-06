@@ -15,7 +15,9 @@ import io
 import json
 import logging
 import os
+import re
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -46,8 +48,34 @@ BRONZE_FIELDS = [
 
 TRACKING_PARAMETERS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 
-# Countries are requested in this order within one batch. Puerto Rico is
-# included as a separate territory so its coverage is visible in the audit.
+# Countries are requested in this order within one batch. This is deliberately
+# limited to Spanish-speaking Latin America; Spain and Equatorial Guinea are
+# outside the thesis collection scope. Puerto Rico is included as a separate
+# territory so its coverage is visible in the audit.
+LATAM_COUNTRY_CODES = frozenset(
+    {
+        "ar",
+        "bo",
+        "cl",
+        "co",
+        "cr",
+        "cu",
+        "do",
+        "ec",
+        "gt",
+        "hn",
+        "mx",
+        "ni",
+        "pa",
+        "pe",
+        "pr",
+        "py",
+        "sv",
+        "uy",
+        "ve",
+    }
+)
+
 DEFAULT_COUNTRY_SEQUENCE = (
     "ar",
     "bo",
@@ -57,9 +85,7 @@ DEFAULT_COUNTRY_SEQUENCE = (
     "cu",
     "do",
     "ec",
-    "es",
     "gt",
-    "gq",
     "hn",
     "mx",
     "ni",
@@ -73,27 +99,25 @@ DEFAULT_COUNTRY_SEQUENCE = (
 )
 
 COUNTRY_NAME_ALIASES = {
-    "ar": ("argentina",),
-    "bo": ("bolivia",),
-    "cl": ("chile",),
-    "co": ("colombia",),
-    "cr": ("costa rica",),
-    "cu": ("cuba",),
-    "do": ("dominican republic",),
-    "ec": ("ecuador",),
-    "es": ("spain",),
-    "gt": ("guatemala",),
-    "gq": ("equatorial guinea",),
-    "hn": ("honduras",),
-    "mx": ("mexico",),
-    "ni": ("nicaragua",),
-    "pa": ("panama",),
-    "pe": ("peru",),
-    "pr": ("puerto rico",),
-    "py": ("paraguay",),
-    "sv": ("el salvador",),
-    "uy": ("uruguay",),
-    "ve": ("venezuela",),
+    "ar": ("ar", "argentina"),
+    "bo": ("bo", "bolivia", "bolivia plurinational state of"),
+    "cl": ("cl", "chile"),
+    "co": ("co", "colombia"),
+    "cr": ("cr", "costa rica"),
+    "cu": ("cu", "cuba"),
+    "do": ("do", "dominican republic", "republica dominicana"),
+    "ec": ("ec", "ecuador"),
+    "gt": ("gt", "guatemala"),
+    "hn": ("hn", "honduras"),
+    "mx": ("mx", "mexico"),
+    "ni": ("ni", "nicaragua"),
+    "pa": ("pa", "panama"),
+    "pe": ("pe", "peru"),
+    "pr": ("pr", "puerto rico"),
+    "py": ("py", "paraguay"),
+    "sv": ("sv", "el salvador"),
+    "uy": ("uy", "uruguay"),
+    "ve": ("ve", "venezuela"),
 }
 
 
@@ -177,6 +201,27 @@ def _list_value(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _normalize_country_value(value: str) -> str:
+    """Normalize country labels without losing the ISO code mapping."""
+
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    return "".join(char for char in normalized if not unicodedata.combining(char)).strip()
+
+
+def _country_code_from_value(value: str) -> str:
+    """Map NewsData's country code/name to one of the allowed ISO-2 codes."""
+
+    normalized_values = {
+        _normalize_country_value(part)
+        for part in re.split(r"[,;/|]", value)
+        if str(part).strip()
+    }
+    for code in DEFAULT_COUNTRY_SEQUENCE:
+        if normalized_values.intersection(COUNTRY_NAME_ALIASES[code]):
+            return code
+    return ""
+
+
 def _country_sequence() -> list[str]:
     """Return the ordered country cycle used by automatic collection."""
 
@@ -187,15 +232,24 @@ def _country_sequence() -> list[str]:
         raise RuntimeError("NEWSDATA_COUNTRY_SEQUENCE cannot be empty")
     if any(len(value) != 2 for value in sequence):
         raise RuntimeError("NEWSDATA_COUNTRY_SEQUENCE must contain ISO-2 country codes")
+    invalid = sorted(set(sequence) - LATAM_COUNTRY_CODES)
+    if invalid:
+        raise RuntimeError(
+            "NEWSDATA_COUNTRY_SEQUENCE may contain only Spanish LATAM codes: "
+            + ", ".join(sorted(LATAM_COUNTRY_CODES))
+            + f"; invalid: {', '.join(invalid)}"
+        )
+    if len(set(sequence)) != len(sequence):
+        raise RuntimeError("NEWSDATA_COUNTRY_SEQUENCE cannot contain duplicate country codes")
     return sequence
 
 
 def _country_rank(row: dict[str, str], sequence: list[str]) -> int:
     """Sort API results into the configured country order for the CSV."""
 
-    country_text = row.get("country", "").casefold()
+    country_code = _country_code_from_value(row.get("country", ""))
     for index, code in enumerate(sequence):
-        if any(alias in country_text for alias in COUNTRY_NAME_ALIASES.get(code, ())):
+        if country_code == code:
             return index
     return len(sequence)
 
@@ -205,7 +259,11 @@ def _object_storage_client() -> Any:
     return oci.object_storage.ObjectStorageClient(config={}, signer=signer)
 
 
-def _bronze_rows(payload: dict[str, Any], retrieved_at: str) -> list[dict[str, str]]:
+def _bronze_rows(
+    payload: dict[str, Any],
+    retrieved_at: str,
+    allowed_countries: set[str] | None = None,
+) -> list[dict[str, str]]:
     """Map API articles to the ten columns used by the thesis Bronze sheet."""
 
     rows: list[dict[str, str]] = []
@@ -223,6 +281,11 @@ def _bronze_rows(payload: dict[str, Any], retrieved_at: str) -> list[dict[str, s
         category_text = _list_value(item.get("category")).casefold()
         categories = {value.strip() for value in category_text.split(",") if value.strip()}
         if "health" not in categories:
+            continue
+        country_code = _country_code_from_value(_list_value(item.get("country")))
+        if not country_code or country_code not in LATAM_COUNTRY_CODES:
+            continue
+        if allowed_countries is not None and country_code not in allowed_countries:
             continue
 
         raw_url = str(item.get("link") or "").strip()
@@ -248,7 +311,7 @@ def _bronze_rows(payload: dict[str, Any], retrieved_at: str) -> list[dict[str, s
                 "topic": "health",
                 "selection_status": "PENDIENTE",
                 "retrieved_at": retrieved_at,
-                "country": _list_value(item.get("country")),
+                "country": country_code,
             }
         )
     return rows
@@ -521,7 +584,7 @@ def _collect_country_batch(
             requested_country=requested_country,
             key_start_index=group_index % len(api_keys),
         )
-        candidates = _bronze_rows(payload, retrieved_at)
+        candidates = _bronze_rows(payload, retrieved_at, set(country_group))
         country_candidates = len(candidates)
         country_duplicates = 0
         country_new = 0
