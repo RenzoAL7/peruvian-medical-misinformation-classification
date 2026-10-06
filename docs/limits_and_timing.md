@@ -5,6 +5,12 @@ configurados actualmente y los límites publicados por los proveedores. Un
 tiempo indicado como `máximo` es un presupuesto interno de la Function; no es
 una promesa de que el proveedor responderá en ese tiempo ni un SLA.
 
+El ajuste de presupuesto de `fetch-newsdata` (`NEWSDATA_MAX_SECONDS`,
+`NEWSDATA_TIME_BUFFER` y `elapsed_seconds`) está incluido en el PR de esta
+documentación. Para que esos campos aparezcan en la respuesta de producción se
+debe desplegar la nueva imagen después de fusionar el PR; la imagen que ya
+estaba activa conserva su comportamiento anterior hasta ese despliegue.
+
 ## Resumen de una corrida
 
 | Etapa | Disparador | Trabajo máximo por invocación | Presupuesto interno | Salida |

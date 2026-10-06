@@ -90,6 +90,10 @@ en [`docs/limits_and_timing.md`](docs/limits_and_timing.md). Incluye enlaces a
 la documentación oficial de OCI Functions, Scheduler, Events, Object Storage,
 Generative AI, NewsData, Gemini y PubMed.
 
+El nuevo presupuesto interno del recolector y su campo `elapsed_seconds` quedan
+listos en el PR de documentación; después de fusionarlo hay que desplegar la
+imagen de `fetch-newsdata` para que la Function activa los use.
+
 ## Flujo local histórico (no es el flujo operativo)
 
 Los scripts y registros de la primera exploración se conservan para
