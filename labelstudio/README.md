@@ -5,7 +5,7 @@ es todavía Gold: contiene candidatos recuperados de PubMed y puntuaciones de
 similitud. Una persona debe decidir la relación de la evidencia y la etiqueta
 final antes de que una fila entre al conjunto de entrenamiento.
 
-## 1. Ejecutar Label Studio
+## 1. Crear un proyecto limpio y ejecutar Label Studio
 
 Con Docker Desktop iniciado:
 
@@ -21,6 +21,13 @@ configuración del proyecto copia el contenido de [`config.xml`](config.xml).
 El proyecto usado durante la prueba fue `MedNews LATAM - Evidence Review`
 (id 1); para un conjunto limpio se puede crear otro proyecto y pasar su id a
 los scripts.
+
+No reutilices un proyecto que tenga anotaciones creadas con la configuración
+anterior (`claim_text`/`label`). La configuración actual usa
+`claim`/`final_label`; mezclar ambas produce el error de incompatibilidad de
+Label Studio. Para empezar la colaboración, crea un proyecto limpio con la
+configuración actual o migra explícitamente las anotaciones antiguas antes de
+importar más tareas.
 
 ## 2. Importar evidencia sin duplicar
 
@@ -93,13 +100,65 @@ complete en una corrida posterior. Los tiempos de las Functions, el drenaje
 horario y los límites de PubMed/Gemini/Embed están en
 [`docs/limits_and_timing.md`](../docs/limits_and_timing.md).
 
-## Trabajo entre dos personas
+## 5. Trabajo entre dos personas
 
 Para colaborar en la misma instancia, el dueño del proyecto invita al otro
-usuario desde **Members** y ambos usan el mismo `project_id`. Cada importación
-se deduplica por `record_id`; las reimportaciones no crean una segunda tarea.
-Si se necesita doble anotación, se activa la segunda anotación sobre la misma
-tarea y se resuelve el desacuerdo antes de exportar.
+usuario desde **Members** y ambos usan el mismo `project_id`. La instancia debe
+ser accesible para ambos: `localhost` solo sirve en la computadora que ejecuta
+el contenedor. Cada importación se deduplica por `record_id`; las
+reimportaciones no crean una segunda tarea.
+
+Una división simple es que tu amigo revise las tareas cuyo `evidence_run_id`
+proviene de la corrida de las 08:00 Lima y tú las de las 20:00 Lima. Antes de
+empezar, registren esa asignación en una lista compartida de `record_id`; el
+manifest controla importaciones, no asignaciones de revisor. Si se necesita
+doble anotación, ambos revisan la misma tarea y resuelven el desacuerdo antes
+de exportar.
+
+## 6. Validar antes de publicar Gold
+
+No copies ni edites a mano un CSV de `silver/evidence/` para crear Gold. Primero
+exporta las anotaciones humanas y luego valida la exportación:
+
+```bash
+python3 labelstudio/export_annotations.py \
+  --project-id 1 \
+  --output labelstudio/artifacts/gold_labels_2026-10-07.csv \
+  --raw-export labelstudio/artifacts/labelstudio_export_2026-10-07.json
+
+python3 labelstudio/validate_gold.py \
+  --input labelstudio/artifacts/gold_labels_2026-10-07.csv \
+  --reviewed-output labelstudio/artifacts/gold_reviewed_2026-10-07.csv \
+  --training-output labelstudio/artifacts/gold_training_2026-10-07.csv \
+  --rejected-output labelstudio/artifacts/gold_rejected_2026-10-07.csv \
+  --fail-on-reject
+```
+
+El validador exige trazabilidad de la anotación humana y una combinación
+coherente entre relación y etiqueta: `RESPALDADA/supports`,
+`REFUTADA/contradicts` o `NO_DETERMINABLE/unclear`. Mantiene todas las filas
+válidas en el CSV de auditoría (`gold/reviewed/`), pero solo deja
+`RESPALDADA` y `REFUTADA` en el CSV de entrenamiento (`gold/training/`). Las
+filas rechazadas requieren corrección en Label Studio; con `--fail-on-reject`
+no debes publicarlas.
+
+Después de una validación sin rechazados, publica explícitamente los dos CSV
+generados —no el CSV Silver ni el export JSON crudo— en Object Storage:
+
+```bash
+oci os object put --namespace "$OBJECT_STORAGE_NAMESPACE" \
+  --bucket-name mednews-data \
+  --name "gold/reviewed/gold_reviewed_2026-10-07.csv" \
+  --file labelstudio/artifacts/gold_reviewed_2026-10-07.csv
+
+oci os object put --namespace "$OBJECT_STORAGE_NAMESPACE" \
+  --bucket-name mednews-data \
+  --name "gold/training/gold_training_2026-10-07.csv" \
+  --file labelstudio/artifacts/gold_training_2026-10-07.csv
+```
+
+Guarda el export JSON y el CSV de rechazados como evidencia privada de auditoría;
+no forman parte del conjunto binario de entrenamiento.
 
 ```text
 silver/evidence/*.csv
@@ -108,7 +167,7 @@ silver/evidence/*.csv
         v
 Label Studio: relación + etiqueta + nota humana
         |
-        | export_annotations.py (última anotación por record_id)
+        | export_annotations.py + validate_gold.py
         v
-gold_labels.csv -> revisión final -> dataset de entrenamiento
+gold/reviewed (auditoría) + gold/training (binario)
 ```
