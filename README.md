@@ -69,8 +69,8 @@ Los valores actuales son presupuestos por invocación: NewsData recolecta hasta
 filas; claims intenta todas las filas pendientes en solicitudes de 10; evidence
 intenta todas las claims pendientes y conserva hasta 10 artículos PubMed por
 claim. Cada Function tiene un presupuesto interno de
-aproximadamente 240 segundos y deja 10 segundos antes del límite síncrono de
-300 segundos de OCI Functions. Si una etapa no termina, escribe el trabajo
+aproximadamente 150 segundos y deja 10 segundos antes del límite síncrono de
+OCI Functions y del límite práctico del Scheduler. Si una etapa no termina, escribe el trabajo
 completado y el drenaje horario continúa con las filas pendientes.
 
 El tiempo extremo a extremo no es un único timeout: un CSV Bronze de 50 filas

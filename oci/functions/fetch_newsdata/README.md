@@ -30,7 +30,7 @@ NEWSDATA_COUNTRY_GROUP_SIZE=5
 NEWSDATA_COUNTRY_DELAY=1
 NEWSDATA_PAGE_DELAY=1
 NEWSDATA_MAX_RETRIES=2
-NEWSDATA_MAX_SECONDS=240
+NEWSDATA_MAX_SECONDS=150
 NEWSDATA_TIME_BUFFER=10
 NEWSDATA_REMOVEDUPLICATE=1
 NEWSDATA_VIDEO=0
@@ -71,9 +71,9 @@ batch has fewer than 50; set it to `1` only when an incomplete CSV must be
 rejected. A target of 50 keeps the Bronze batch small enough for the next body
 extraction step to run within the OCI Functions timeout. The query broadens the
 medical vocabulary and must remain at most 100 characters because that is the
-NewsData API limit. `NEWSDATA_MAX_SECONDS` is an internal 240-second budget and
+NewsData API limit. `NEWSDATA_MAX_SECONDS` is an internal 150-second budget and
 `NEWSDATA_TIME_BUFFER` reserves 10 seconds before OCI's 300-second synchronous
-limit. If the budget is reached, the function writes the rows collected so far
+limit and the Resource Scheduler's shorter synchronous wait. If the budget is reached, the function writes the rows collected so far
 when `NEWSDATA_REQUIRE_TARGET_ROWS=0` and leaves the remaining countries for a
 later scheduled run. Increase `NEWSDATA_TARGET_ROWS` or
 `NEWSDATA_MAX_PAGES` only after measuring elapsed time and checking the account's

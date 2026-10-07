@@ -955,7 +955,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         # invocation can continue with the next batch until its deadline.
         max_rows = _env_int("LLM_MAX_ROWS", 0, minimum=0)
         request_batch_size = _env_int("LLM_REQUEST_BATCH_SIZE", 10, minimum=1)
-        max_seconds = _env_float("LLM_MAX_SECONDS", 240.0, minimum=1.0)
+        max_seconds = _env_float("LLM_MAX_SECONDS", 150.0, minimum=1.0)
         time_buffer = _env_float("LLM_TIME_BUFFER", 10.0, minimum=0.0)
         max_body_chars = _env_int("LLM_MAX_BODY_CHARS", 12_000, minimum=500)
         max_tokens = _env_int("LLM_MAX_TOKENS", 3000, minimum=50)

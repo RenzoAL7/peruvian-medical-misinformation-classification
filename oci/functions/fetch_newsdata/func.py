@@ -591,7 +591,7 @@ def _collect_country_batch(
         raise RuntimeError("NEWSDATA_COUNTRY_DELAY must be a number") from exc
     if country_delay < 0:
         raise RuntimeError("NEWSDATA_COUNTRY_DELAY cannot be negative")
-    max_seconds = _env_float("NEWSDATA_MAX_SECONDS", 240.0, minimum=30.0)
+    max_seconds = _env_float("NEWSDATA_MAX_SECONDS", 150.0, minimum=30.0)
     time_buffer = _env_float("NEWSDATA_TIME_BUFFER", 10.0, minimum=0.0)
     if time_buffer >= max_seconds:
         raise RuntimeError("NEWSDATA_TIME_BUFFER must be smaller than NEWSDATA_MAX_SECONDS")

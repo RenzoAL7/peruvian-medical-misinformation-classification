@@ -1565,7 +1565,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         top_k = _env_int("PUBMED_TOP_K", 10, minimum=1, maximum=20)
         request_delay = _env_float("PUBMED_REQUEST_DELAY", 0.4, minimum=0.34)
         request_timeout = _env_float("PUBMED_REQUEST_TIMEOUT", 20.0, minimum=5.0)
-        max_seconds = _env_float("EVIDENCE_MAX_SECONDS", 240.0, minimum=30.0)
+        max_seconds = _env_float("EVIDENCE_MAX_SECONDS", 150.0, minimum=30.0)
         abstract_max_chars = _env_int("ABSTRACT_MAX_CHARS", 3000, minimum=500, maximum=10000)
         translate_enabled = _env_bool("TRANSLATE_ABSTRACTS", True)
         translation_secret_ids = _secret_ids(

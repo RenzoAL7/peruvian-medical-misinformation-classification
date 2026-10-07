@@ -55,15 +55,17 @@ incluidas las dos claves de Gemini usadas por Evidence.
 
 ## Presupuesto de tiempo
 
-El timeout síncrono máximo de OCI Functions es de 300 segundos. Para no llegar
-al borde, las cuatro Functions tienen un presupuesto interno de 240 segundos y
-un margen de 10 segundos para terminar la escritura del objeto:
+El timeout síncrono máximo de OCI Functions es de 300 segundos. Resource
+Scheduler marca como fallida una invocación síncrona que se acerca a tres
+minutos aunque la Function siga escribiendo resultados; por ello las cuatro
+Functions tienen un presupuesto interno de 150 segundos y un margen de 10
+segundos para terminar la escritura del objeto:
 
 ```text
-NEWSDATA_MAX_SECONDS=240       NEWSDATA_TIME_BUFFER=10
-BODY_MAX_SECONDS=240           BODY_TIME_BUFFER=10
-LLM_MAX_SECONDS=240            LLM_TIME_BUFFER=10
-EVIDENCE_MAX_SECONDS=240
+NEWSDATA_MAX_SECONDS=150       NEWSDATA_TIME_BUFFER=10
+BODY_MAX_SECONDS=150           BODY_TIME_BUFFER=10
+LLM_MAX_SECONDS=150            LLM_TIME_BUFFER=10
+EVIDENCE_MAX_SECONDS=150
 ```
 
 Los valores son límites de trabajo, no duraciones garantizadas. El lote real
@@ -99,6 +101,11 @@ humano en Label Studio.
 | Silver body | `extract-news-body` | 50 filas | `silver/body/body_<run_id>.csv` |
 | Silver claims | `extract-claims` | Todas las filas elegibles pendientes; solicitudes Gemini de 10 filas | `silver/claims/claims_<run_id>.csv` |
 | Silver evidence | `retrieve-pubmed-evidence` | Todas las claims elegibles pendientes; hasta 10 artículos por claim | `silver/evidence/evidence_<run_id>.csv` |
+
+`extract-news-body` debe usar el prefijo específico `SILVER_BODY_PREFIX=silver/body`.
+No se debe configurar el prefijo genérico `SILVER_PREFIX=silver`: produciría
+`silver/body_<run_id>.csv`, que no coincide con la regla Events
+`silver/body/*.csv` y corta la cadena automática.
 
 Claims y evidence recorren todos los pendientes en una invocación y detienen el
 trabajo al alcanzar el presupuesto interno. Las solicitudes individuales siguen

@@ -15,10 +15,10 @@ estaba activa conserva su comportamiento anterior hasta ese despliegue.
 
 | Etapa | Disparador | Trabajo máximo por invocación | Presupuesto interno | Salida |
 | --- | --- | ---: | ---: | --- |
-| Recolección NewsData | Scheduler, 08:00 y 20:00 Lima | 50 filas nuevas; hasta 8 solicitudes con la configuración actual | 240 s + 10 s de margen | `bronze/newsdata_<run_id>.csv` |
-| Extracción del cuerpo | Event `bronze/*.csv` + drenaje horario | 50 filas | 240 s + 10 s de margen | `silver/body/body_<run_id>.csv` |
-| Claims | Event `silver/body/*.csv` + drenaje horario | Todas las filas elegibles; solicitudes Gemini de 10 filas | 240 s + 10 s de margen | `silver/claims/claims_<run_id>.csv` |
-| Evidence | Event `silver/claims/*.csv` + drenaje horario | Todas las claims elegibles; hasta 10 artículos PubMed por claim | 240 s + margen de 10 s dentro del código | `silver/evidence/evidence_<run_id>.csv` |
+| Recolección NewsData | Scheduler, 08:00 y 20:00 Lima | 50 filas nuevas; hasta 8 solicitudes con la configuración actual | 150 s + 10 s de margen | `bronze/newsdata_<run_id>.csv` |
+| Extracción del cuerpo | Event `bronze/*.csv` + drenaje horario | 50 filas | 150 s + 10 s de margen | `silver/body/body_<run_id>.csv` |
+| Claims | Event `silver/body/*.csv` + drenaje horario | Todas las filas elegibles; solicitudes Gemini de 10 filas | 150 s + 10 s de margen | `silver/claims/claims_<run_id>.csv` |
+| Evidence | Event `silver/claims/*.csv` + drenaje horario | Todas las claims elegibles; hasta 10 artículos PubMed por claim | 150 s + margen de 10 s dentro del código | `silver/evidence/evidence_<run_id>.csv` |
 | Etiquetado | Persona en Label Studio | No tiene timeout de OCI | Depende del equipo | Gold revisado |
 
 Los tamaños son límites superiores, no cantidades garantizadas. Si una etapa
@@ -51,17 +51,18 @@ Scheduler.
 
 OCI permite configurar el timeout síncrono de una Function hasta 300 segundos.
 El pipeline no espera hasta ese borde: cada etapa termina su trabajo normal
-alrededor de los 240 segundos y conserva un margen de 10 segundos para
-serializar y escribir el CSV. El valor se controla con:
+alrededor de los 150 segundos y conserva un margen de 10 segundos para
+serializar y escribir el CSV. Esto deja holgura frente al límite práctico de
+espera de Resource Scheduler. El valor se controla con:
 
 ```text
-NEWSDATA_MAX_SECONDS=240
+NEWSDATA_MAX_SECONDS=150
 NEWSDATA_TIME_BUFFER=10
-BODY_MAX_SECONDS=240
+BODY_MAX_SECONDS=150
 BODY_TIME_BUFFER=10
-LLM_MAX_SECONDS=240
+LLM_MAX_SECONDS=150
 LLM_TIME_BUFFER=10
-EVIDENCE_MAX_SECONDS=240
+EVIDENCE_MAX_SECONDS=150
 ```
 
 El timeout de la llamada `oci fn function invoke` debe ser mayor que el
