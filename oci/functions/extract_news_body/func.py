@@ -424,6 +424,22 @@ def _write_silver(
     return object_name
 
 
+def _body_output_prefix() -> str:
+    """Return the only prefix that can trigger the next OCI Events stage.
+
+    ``SILVER_PREFIX=silver`` was a historical setting that wrote body CSVs next
+    to the folders, so the ``silver/body/*.csv`` Events rule never matched.
+    Honour an explicitly scoped legacy value, but treat the generic ``silver``
+    value as the safe body default.
+    """
+
+    scoped_prefix = os.getenv("SILVER_BODY_PREFIX", "").strip("/")
+    if scoped_prefix:
+        return scoped_prefix
+    legacy_prefix = os.getenv("SILVER_PREFIX", "").strip("/")
+    return legacy_prefix if legacy_prefix and legacy_prefix != "silver" else "silver/body"
+
+
 def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
     """Process up to one body batch and write the attempted rows to Silver."""
 
@@ -434,9 +450,9 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         namespace = _required_env("OBJECT_STORAGE_NAMESPACE")
         bucket = _required_env("OBJECT_STORAGE_BUCKET")
         bronze_prefix = os.getenv("BRONZE_PREFIX", "bronze").strip("/")
-        silver_prefix = os.getenv("SILVER_PREFIX", "silver").strip("/")
+        silver_prefix = _body_output_prefix()
         batch_size = _env_int("BODY_BATCH_SIZE", 50, minimum=1)
-        max_seconds = _env_float("BODY_MAX_SECONDS", 240.0, minimum=1.0)
+        max_seconds = _env_float("BODY_MAX_SECONDS", 150.0, minimum=1.0)
         time_buffer = _env_float("BODY_TIME_BUFFER", 10.0, minimum=0.0)
         request_timeout = _env_float("BODY_REQUEST_TIMEOUT", 15.0, minimum=1.0)
         max_bytes = _env_int("BODY_MAX_BYTES", 1_500_000, minimum=10_000)

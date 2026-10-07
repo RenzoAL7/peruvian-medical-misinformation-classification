@@ -19,9 +19,9 @@ The function uses the same resource principal and Object Storage permissions as
 OBJECT_STORAGE_NAMESPACE=<tenancy Object Storage namespace>
 OBJECT_STORAGE_BUCKET=mednews-data
 BRONZE_PREFIX=bronze
-SILVER_PREFIX=silver
+SILVER_BODY_PREFIX=silver/body
 BODY_BATCH_SIZE=50
-BODY_MAX_SECONDS=240
+BODY_MAX_SECONDS=150
 BODY_TIME_BUFFER=10
 BODY_REQUEST_TIMEOUT=15
 BODY_MAX_RETRIES=1
@@ -36,7 +36,7 @@ the 300-second OCI Functions limit. If pages are slow, the function writes the
 rows completed before the internal deadline and the remaining Bronze rows stay
 pending for the next invocation.
 
-The usual budget is 240 seconds with `BODY_TIME_BUFFER=10`; each URL has a
+The usual budget is 150 seconds with `BODY_TIME_BUFFER=10`; each URL has a
 15-second request timeout and at most one retry. The elapsed time and pending
 rows are visible in the invocation log. See the consolidated limits and
 duration table in [`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md).
