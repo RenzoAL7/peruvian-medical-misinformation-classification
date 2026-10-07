@@ -25,6 +25,34 @@ invocaciones no recolectan noticias: recorren los CSV pendientes, completan los
 lotes que no alcanzaron a procesarse y reintentan únicamente los errores
 transitorios. Si no hay trabajo pendiente, terminan sin escribir un CSV nuevo.
 
+## Permisos y activación de los schedules
+
+Cada schedule que invoca una Function necesita una identidad propia en un
+dynamic group que coincida con el OCID exacto del `resourceschedule`. Esa
+identidad debe tener, en el compartimento de las Functions:
+
+```text
+read fn-app
+read fn-function
+use fn-invocation
+```
+
+El último permiso puede restringirse a la Function destino. No basta con
+otorgar únicamente `use fn-invocation`: Resource Scheduler también resuelve la
+aplicación y la Function antes de la invocación. Las reglas de OCI Events usan
+su propia identidad y conservan su permiso `use fn-invocation` hacia la etapa
+siguiente.
+
+La hora `time-starts` debe ser anterior al siguiente tick cron deseado. Por
+ejemplo, para ejecutar `0 13 * * *` a las 08:00 de Lima, no se debe crear el
+schedule con inicio exactamente a las 13:00 UTC: OCI puede calcular la primera
+recurrencia para el día siguiente. Verificar siempre `time-next-run` después de
+crear o actualizar un schedule.
+
+Las Functions ejecutan como `mednews-functions`; esa identidad debe leer cada
+secret bundle configurado para NewsData, claims y traducción de abstracts,
+incluidas las dos claves de Gemini usadas por Evidence.
+
 ## Presupuesto de tiempo
 
 El timeout síncrono máximo de OCI Functions es de 300 segundos. Para no llegar
