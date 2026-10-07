@@ -133,8 +133,12 @@ Studio con [`labelstudio/import_evidence.py`](labelstudio/import_evidence.py).
 El script consulta las tareas existentes y no duplica un `record_id`. Tu amigo
 puede usar el mismo proyecto, revisar la relación `supports/contradicts/unclear`
 y la etiqueta final, y exportar con
-[`labelstudio/export_annotations.py`](labelstudio/export_annotations.py).
-La guía completa está en [`labelstudio/README.md`](labelstudio/README.md).
+[`labelstudio/export_annotations.py`](labelstudio/export_annotations.py). Antes
+de publicar a Object Storage,
+[`labelstudio/validate_gold.py`](labelstudio/validate_gold.py) separa el
+conjunto auditado de `gold/reviewed/` y el binario apto para entrenamiento de
+`gold/training/`; nunca se sube un CSV Silver directamente a Gold. La guía
+completa está en [`labelstudio/README.md`](labelstudio/README.md).
 
 Solo las filas revisadas por una persona, con evidencia trazable y etiqueta
 binaria final, pasan a Gold y al split de entrenamiento.
@@ -165,6 +169,7 @@ labelstudio/
   config.xml                     interfaz de revisión humana
   import_evidence.py             importa evidencia sin duplicar
   export_annotations.py          exporta etiquetas Gold
+  validate_gold.py               valida y separa auditoría/entrenamiento Gold
   README.md                      guía para el equipo
 ```
 

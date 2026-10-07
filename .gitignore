@@ -14,8 +14,10 @@ checkpoints/
 
 # Datos locales y artefactos generados
 # Los resultados temporales de cada corrida se conservan fuera de Git.
-# La revisión humana vive en Google Sheets y las credenciales nunca se versionan.
+# Los datos de revisión humana y las credenciales nunca se versionan.
 *.csv
+labelstudio/artifacts/
+labelstudio-data/
 data/00_control/*
 !data/00_control/.gitkeep
 data/01_candidates/*
