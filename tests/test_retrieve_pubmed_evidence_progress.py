@@ -39,6 +39,13 @@ def test_no_new_claims_switches_to_translation_drain() -> None:
     assert module._next_mode_after_claim_selection("retrieve", [{"record_id": "new"}]) == "retrieve"
 
 
+def test_deferred_translation_requires_a_safe_provider_window() -> None:
+    module = _load_module()
+
+    assert module._has_time_for_deferred_translation(35.0, 30.0)
+    assert not module._has_time_for_deferred_translation(34.9, 30.0)
+
+
 def test_embedding_ranking_sets_best_pmid_even_before_translation(monkeypatch) -> None:
     module = _load_module()
     row = {

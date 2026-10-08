@@ -18,12 +18,12 @@ estaba activa conserva su comportamiento anterior hasta ese despliegue.
 | Recolección NewsData | Scheduler, 08:00 y 20:00 Lima | 50 filas nuevas; hasta 8 solicitudes con la configuración actual | 150 s + 10 s de margen | `bronze/newsdata_<run_id>.csv` |
 | Extracción del cuerpo | Event `bronze/*.csv` + drenaje horario | 50 filas | 150 s + 10 s de margen | `silver/body/body_<run_id>.csv` |
 | Claims | Event `silver/body/*.csv` + drenaje horario | Todas las filas elegibles; solicitudes Gemini de 10 filas | 150 s + 10 s de margen | `silver/claims/claims_<run_id>.csv` |
-| Evidence | Event `silver/claims/*.csv` + drenaje horario | Todas las claims elegibles; hasta 10 artículos PubMed por claim | 150 s + margen de 10 s dentro del código | `silver/evidence/evidence_<run_id>.csv` |
+| Evidence | Event `silver/claims/*.csv` | Todas las claims elegibles; hasta 10 artículos PubMed por claim | 270 s + margen de 10 s dentro del código | `silver/evidence/evidence_<run_id>.csv` |
 | Etiquetado | Persona en Label Studio | No tiene timeout de OCI | Depende del equipo | Gold revisado |
 
 Los tamaños son límites superiores, no cantidades garantizadas. Si una etapa
-se queda sin tiempo, escribe lo que terminó y deja el resto pendiente para el
-siguiente drenaje. El `run_id`, el nombre del objeto, `row_count` y los campos
+se queda sin tiempo, escribe lo que terminó y deja el resto pendiente para la
+siguiente activación de esa etapa. El `run_id`, el nombre del objeto, `row_count` y los campos
 de auditoría son la fuente de verdad para saber cuánto se procesó realmente.
 
 Con dos corridas de recolección al día, el objetivo normal es de hasta 100
@@ -36,13 +36,13 @@ filas porque NewsData entrega una ventana reciente y Bronze ya puede contener
 
 El tiempo de una Function y el tiempo de todo el pipeline son cosas distintas.
 Events puede iniciar la siguiente etapa poco después del `PUT`, pero el
-servicio es asíncrono; el drenaje horario es el mecanismo de seguridad. Para un
+servicio es asíncrono. Para un
 CSV Bronze de 50 filas, claims hace como máximo 5 solicitudes Gemini de 10
 filas dentro de una invocación. Evidence intenta procesar todas las claims
 resultantes en esa invocación: hace una búsqueda PubMed por claim, agrupa el
 EFetch, trocea los embeddings y traduce abstracts en grupos de 2. Si ese trabajo
-no cabe en 230 segundos efectivos, la salida parcial y el drenaje horario
-continúan con las filas restantes. El tiempo observado depende de la cola de
+no cabe dentro del presupuesto, una invocación posterior de Evidence por Events
+aprovecha su tiempo restante para continuar las traducciones pendientes. El tiempo observado depende de la cola de
 OCI, Events, URLs, PubMed, cuotas y errores; se debe reportar desde
 `elapsed_seconds` y los nombres de objetos, no inferirlo solo desde la hora del
 Scheduler.
@@ -62,7 +62,7 @@ BODY_MAX_SECONDS=150
 BODY_TIME_BUFFER=10
 LLM_MAX_SECONDS=150
 LLM_TIME_BUFFER=10
-EVIDENCE_MAX_SECONDS=150
+EVIDENCE_MAX_SECONDS=270
 ```
 
 El timeout de la llamada `oci fn function invoke` debe ser mayor que el
@@ -132,9 +132,10 @@ cuerpo, PubMed y la revisión humana son etapas posteriores.
 contiene exactamente 50 filas. Puede tomar las filas restantes de un segundo
 CSV para llenar el lote. Cada URL tiene timeout de 15 s y un reintento para
 errores transitorios. Una página bloqueada, un paywall o un cuerpo muy corto
-queda en el CSV con `extraction_status` y no se vuelve a pedir si el resultado
-es terminal. Timeouts, throttling, errores de conexión y HTTP 5xx sí quedan
-pendientes para el drenaje horario.
+queda en el CSV con `extraction_status`. Los cuerpos insuficientes son
+terminales. Timeouts, throttling, errores de conexión, HTTP 403,
+redirecciones fallidas y HTTP 5xx quedan pendientes para el próximo evento que
+active Body.
 
 Así se evita que una corrida de 50 URLs exceda los 300 s de OCI. No se elimina
 una fila sin explicación: `HTTP_ERROR`, `TIMEOUT`, `URL_ERROR` y
@@ -205,7 +206,8 @@ y [NCBI E-utilities usage guidelines](https://www.ncbi.nlm.nih.gov/books/NBK2549
 Resource Scheduler evalúa los cron en UTC. Las expresiones `0 13 * * *` y
 `0 1 * * *` representan 08:00 y 20:00 en Lima mientras la conversión local sea
 la esperada. Scheduler no cambia automáticamente el cron por horario de
-verano y su intervalo mínimo es de una hora; por eso el drenaje usa `0 * * * *`.
+verano y su intervalo mínimo es de una hora; por eso Body y Claims usan el
+drenaje `0 * * * *`.
 La hora de inicio puede retrasarse por la cola del servicio.
 
 Object Storage usa prefijos, no carpetas POSIX. Un archivo `bronze/foo.csv`
@@ -218,8 +220,8 @@ pequeños CSV auditables y evita reescribir todo el histórico.
 
 Events es asíncrono: la creación de un objeto puede disparar la siguiente
 Function después de que el PUT terminó y una entrega puede necesitar reintento.
-Por eso cada etapa es idempotente por `record_id`, y además existe el drenaje
-horario. No se debe usar el timestamp del evento como garantía de que la etapa
+Por eso cada etapa es idempotente por `record_id`; los drenajes de Body y
+Claims complementan sus eventos. No se debe usar el timestamp del evento como garantía de que la etapa
 terminó.
 
 Referencias: [OCI Resource Scheduler](https://docs.oracle.com/en-us/iaas/Content/resource-scheduler/tasks/create-manage.htm)
