@@ -63,8 +63,8 @@ row per `record_id`, and requires `is_claim_eligible=true`, `llm_status=OK`,
 `claim_text` and `pubmed_query_en`. Record IDs with a terminal evidence result
 already present in `silver/evidence/` are skipped. Transient PubMed, network,
 timeout, and server errors remain eligible for a later retry. A claim without a
-query is left pending for a later enrichment run. When no new claims remain,
-the hourly drain automatically resumes rows whose Spanish abstracts were left
+query is left pending for a later enrichment run. When Evidence is invoked and
+no new claims remain, it resumes rows whose Spanish abstracts were left
 untranslated because a prior invocation reached its time budget.
 
 `EVIDENCE_MAX_ROWS=0` means that the Function selects every eligible claim that
