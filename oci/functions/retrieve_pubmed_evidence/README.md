@@ -63,12 +63,14 @@ row per `record_id`, and requires `is_claim_eligible=true`, `llm_status=OK`,
 `claim_text` and `pubmed_query_en`. Record IDs with a terminal evidence result
 already present in `silver/evidence/` are skipped. Transient PubMed, network,
 timeout, and server errors remain eligible for a later retry. A claim without a
-query is left pending for a later enrichment run.
+query is left pending for a later enrichment run. When no new claims remain,
+the hourly drain automatically resumes rows whose Spanish abstracts were left
+untranslated because a prior invocation reached its time budget.
 
 `EVIDENCE_MAX_ROWS=0` means that the Function selects every eligible claim that
 does not have terminal evidence and works through them until the internal time
 budget. Set a positive value only to deliberately cap a run. The legacy
-`EVIDENCE_BATCH_SIZE` variable is not used as an invocation cap. The 240-second
+`EVIDENCE_BATCH_SIZE` variable is not used as an invocation cap. The 150-second
 budget leaves a safety margin before OCI's 300-second synchronous
 limit, waits 0.4 seconds between PubMed requests, translates abstracts in
 groups of 2, and alternates the two configured translation keys, using the
