@@ -965,6 +965,20 @@ def _translation_complete(row: dict[str, str]) -> bool:
     )
 
 
+def _next_mode_after_claim_selection(mode: str, pending_claims: list[dict[str, str]]) -> str:
+    """Drain deferred abstract translations once retrieval has no new work.
+
+    Evidence rows remain terminal for PubMed retrieval after candidates have
+    been saved, even if their Spanish translations ran out of time. Without
+    this handoff, the hourly invocation finds no new claims and never resumes
+    those deferred translations.
+    """
+
+    if mode == "retrieve" and not pending_claims:
+        return "translate_existing"
+    return mode
+
+
 def _pending_translation_rows(
     client: Any,
     namespace: str,
@@ -1477,6 +1491,7 @@ def _apply_embeddings(
         row["embedding_status"] = "OK"
         row["ranking_method"] = EMBEDDING_METHOD
         if candidates and candidates[0].get("embedding_similarity") is not None:
+            row["best_pmid"] = str(candidates[0].get("pmid", ""))
             row["best_embedding_similarity"] = str(candidates[0]["embedding_similarity"])
             row["best_cosine_similarity"] = str(candidates[0]["embedding_similarity"])
             row["cosine_method"] = EMBEDDING_METHOD
@@ -1627,6 +1642,12 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             if translation_secret_ids and not translation_api_keys:
                 translation_config_error = "No usable translation Gemini Vault secret was found"
 
+        if mode == "retrieve":
+            claim_rows, scan_meta = _latest_claim_rows(storage, namespace, bucket, claims_prefix)
+            existing_ids = _existing_evidence_ids(storage, namespace, bucket, evidence_prefix)
+            pending, selection_meta = _select_claims(claim_rows, existing_ids, max_rows)
+            mode = _next_mode_after_claim_selection(mode, pending)
+
         if mode == "translate_existing":
             pending, selection_meta = _pending_translation_rows(
                 storage,
@@ -1700,10 +1721,6 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 response_data=json.dumps(result, ensure_ascii=False),
                 headers={"Content-Type": "application/json"},
             )
-
-        claim_rows, scan_meta = _latest_claim_rows(storage, namespace, bucket, claims_prefix)
-        existing_ids = _existing_evidence_ids(storage, namespace, bucket, evidence_prefix)
-        pending, selection_meta = _select_claims(claim_rows, existing_ids, max_rows)
 
         query_pmids: dict[str, list[str]] = {}
         errors: dict[str, str] = {}
