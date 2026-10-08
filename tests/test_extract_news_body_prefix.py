@@ -48,3 +48,11 @@ def test_body_output_prefix_keeps_an_explicit_legacy_subprefix(monkeypatch) -> N
     monkeypatch.setenv("SILVER_PREFIX", "silver/body")
 
     assert module._body_output_prefix() == "silver/body"
+
+
+def test_body_redirects_are_retried_and_resolved_as_http_urls() -> None:
+    module = _load_module()
+
+    assert 403 in module.RETRYABLE_HTTP_STATUS
+    assert 307 in module.RETRYABLE_HTTP_STATUS
+    assert module._redirect_target("https://example.test/a", "/article") == "https://example.test/article"

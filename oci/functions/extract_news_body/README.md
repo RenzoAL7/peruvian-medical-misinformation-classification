@@ -25,6 +25,7 @@ BODY_MAX_SECONDS=150
 BODY_TIME_BUFFER=10
 BODY_REQUEST_TIMEOUT=15
 BODY_MAX_RETRIES=1
+BODY_MAX_REDIRECTS=5
 BODY_MAX_BYTES=1500000
 BODY_MIN_WORDS=150
 BODY_MIN_CHARS=800
@@ -41,10 +42,11 @@ The usual budget is 150 seconds with `BODY_TIME_BUFFER=10`; each URL has a
 rows are visible in the invocation log. See the consolidated limits and
 duration table in [`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md).
 
-The function reads all existing Silver CSVs and skips `record_id` values with a
-terminal result. This prevents repeated requests to blocked or paywalled sites
-while allowing timeouts, connection failures, throttling, and server errors to
-retry on a later scheduled run. The output keeps every attempt with
+The function follows up to five validated HTTP(S) redirects. It reads all
+existing Silver CSVs and skips `record_id` values with a terminal result.
+Timeouts, connection failures, throttling, server errors, HTTP 403, and failed
+temporary redirects remain pending so the next event-driven Body invocation can
+retry them. The output keeps every attempt with
 `extraction_status` so the decision remains auditable.
 
 ## Silver output
