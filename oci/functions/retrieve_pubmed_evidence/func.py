@@ -979,6 +979,12 @@ def _next_mode_after_claim_selection(mode: str, pending_claims: list[dict[str, s
     return mode
 
 
+def _has_time_for_deferred_translation(remaining_seconds: float, request_timeout: float) -> bool:
+    """Avoid starting another provider request without a safe completion window."""
+
+    return remaining_seconds >= request_timeout + 5.0
+
+
 def _pending_translation_rows(
     client: Any,
     namespace: str,
@@ -1580,7 +1586,11 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         top_k = _env_int("PUBMED_TOP_K", 10, minimum=1, maximum=20)
         request_delay = _env_float("PUBMED_REQUEST_DELAY", 0.4, minimum=0.34)
         request_timeout = _env_float("PUBMED_REQUEST_TIMEOUT", 20.0, minimum=5.0)
-        max_seconds = _env_float("EVIDENCE_MAX_SECONDS", 150.0, minimum=30.0)
+        # A full evidence run includes PubMed, embeddings and Spanish
+        # translations. Keep a safety margin below the 300-second Function
+        # limit, but allow a normal event invocation to finish the candidate
+        # abstracts it has already retrieved.
+        max_seconds = _env_float("EVIDENCE_MAX_SECONDS", 270.0, minimum=30.0)
         abstract_max_chars = _env_int("ABSTRACT_MAX_CHARS", 3000, minimum=500, maximum=10000)
         translate_enabled = _env_bool("TRANSLATE_ABSTRACTS", True)
         translation_secret_ids = _secret_ids(
@@ -1832,6 +1842,47 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             translate_enabled,
             configuration_error=translation_config_error,
         )
+
+        # Events invoke this Function for newly created Claims files.  A
+        # previous evidence run can nevertheless have saved valid candidates
+        # whose translations reached the time budget.  Drain that backlog in
+        # the same event invocation when there is enough time for at least one
+        # provider request.  This keeps recovery event-driven rather than
+        # depending on a second, redundant Evidence schedule.
+        deferred_translation_stats: dict[str, Any] = {}
+        deferred_selection_meta: dict[str, int] = {}
+        deferred_object_name = ""
+        remaining_for_deferred = deadline - time.monotonic()
+        if _has_time_for_deferred_translation(remaining_for_deferred, translation_timeout):
+            deferred_rows, deferred_selection_meta = _pending_translation_rows(
+                storage,
+                namespace,
+                bucket,
+                evidence_prefix,
+                max_rows,
+            )
+            if deferred_rows:
+                deferred_translation_stats = _apply_translations(
+                    deferred_rows,
+                    translation_api_keys,
+                    translation_model,
+                    translation_batch_size,
+                    translation_max_tokens,
+                    translation_timeout,
+                    deadline,
+                    run_id,
+                    translate_enabled,
+                    configuration_error=translation_config_error,
+                )
+                deferred_object_name = _write_evidence(
+                    storage,
+                    namespace,
+                    bucket,
+                    evidence_prefix,
+                    deferred_rows,
+                    run_id,
+                    object_stem="evidence_translated",
+                )
         status_counts = Counter(row.get("evidence_status", "") for row in output_rows)
         object_name = ""
         if output_rows:
@@ -1855,6 +1906,9 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
             "pubmed_requests": str(pubmed_requests),
             "translation": translation_stats,
+            "deferred_translation": deferred_translation_stats,
+            "deferred_translation_object_name": deferred_object_name,
+            "deferred_translation_selection": deferred_selection_meta,
             "translation_model": translation_model if translate_enabled else "",
             "translation_key_slots_configured": str(len(translation_api_keys)) if translate_enabled else "0",
             "top_k": str(top_k),

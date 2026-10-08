@@ -22,8 +22,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import oci
 from bs4 import BeautifulSoup
@@ -60,7 +60,12 @@ SILVER_FIELDS = BRONZE_FIELDS + [
     "extraction_error",
 ]
 
-RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+# Publishers frequently reject a first automated request or return a temporary
+# redirect while applying their own bot/rate-limit controls.  Keep those rows
+# pending so a later event-driven Body invocation can try them again instead of
+# silently treating them as terminal.
+RETRYABLE_HTTP_STATUS = {307, 308, 403, 408, 425, 429, 500, 502, 503, 504}
+REDIRECT_HTTP_STATUS = {301, 302, 303, 307, 308}
 DEFAULT_BODY_SELECTORS = (
     "[itemprop='articleBody']",
     "article",
@@ -283,21 +288,42 @@ def _extract_body_text(html: str) -> tuple[str, str]:
     return max(candidates, key=len), "beautifulsoup"
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Expose redirect responses so the extractor can validate each hop."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _redirect_target(current_url: str, location: str) -> str:
+    """Resolve one HTTP redirect and reject a malformed/non-web destination."""
+
+    target = urljoin(current_url, location.strip())
+    parsed = urlsplit(target)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("redirect target must use http or https")
+    return target
+
+
 def _download_html(
     url: str,
     timeout: float,
     max_bytes: int,
     max_retries: int,
+    max_redirects: int,
     user_agent: str,
 ) -> tuple[bytes, int, str]:
     parsed = urlsplit(url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise ValueError("URL must use http or https")
 
+    opener = build_opener(_NoRedirectHandler())
+    current_url = url
+    redirects = 0
     last_error: Exception | None = None
     for attempt in range(max_retries + 1):
         request = Request(
-            url,
+            current_url,
             headers={
                 "Accept": "text/html,application/xhtml+xml",
                 "Accept-Language": "es-419,es;q=0.9,en;q=0.5",
@@ -306,13 +332,21 @@ def _download_html(
             method="GET",
         )
         try:
-            with urlopen(request, timeout=timeout) as result:
+            with opener.open(request, timeout=timeout) as result:
                 raw = result.read(max_bytes + 1)
                 return raw[:max_bytes], int(result.status or 200), str(
                     result.headers.get("Content-Type", "")
                 )
         except HTTPError as exc:
             last_error = exc
+            if exc.code in REDIRECT_HTTP_STATUS:
+                location = str(exc.headers.get("Location", "")).strip()
+                if not location or redirects >= max_redirects:
+                    raise
+                current_url = _redirect_target(current_url, location)
+                redirects += 1
+                # Following a redirect is not a failed retrieval attempt.
+                continue
             if exc.code not in RETRYABLE_HTTP_STATUS or attempt >= max_retries:
                 raise
         except (URLError, TimeoutError, OSError) as exc:
@@ -330,6 +364,7 @@ def _extract_row(
     request_timeout: float,
     max_bytes: int,
     max_retries: int,
+    max_redirects: int,
     min_words: int,
     min_chars: int,
     max_text_chars: int,
@@ -359,6 +394,7 @@ def _extract_row(
             timeout=max(1.0, min(request_timeout, max(1.0, deadline - time.monotonic()))),
             max_bytes=max_bytes,
             max_retries=max_retries,
+            max_redirects=max_redirects,
             user_agent=user_agent,
         )
         html = _decode_html(body_bytes, content_type)
@@ -457,12 +493,13 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         request_timeout = _env_float("BODY_REQUEST_TIMEOUT", 15.0, minimum=1.0)
         max_bytes = _env_int("BODY_MAX_BYTES", 1_500_000, minimum=10_000)
         max_retries = _env_int("BODY_MAX_RETRIES", 1, minimum=0)
+        max_redirects = _env_int("BODY_MAX_REDIRECTS", 5, minimum=0)
         min_words = _env_int("BODY_MIN_WORDS", 150, minimum=1)
         min_chars = _env_int("BODY_MIN_CHARS", 800, minimum=1)
         max_text_chars = _env_int("BODY_MAX_TEXT_CHARS", 200_000, minimum=1_000)
         user_agent = os.getenv(
             "BODY_USER_AGENT",
-            "mednews-oci-body/0.1 (+research; contact=thesis-pipeline)",
+            "Mozilla/5.0 (compatible; mednews-thesis/0.2; +research contact)",
         ).strip()
         if time_buffer >= max_seconds:
             raise RuntimeError("BODY_TIME_BUFFER must be smaller than BODY_MAX_SECONDS")
@@ -489,6 +526,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                     request_timeout,
                     max_bytes,
                     max_retries,
+                    max_redirects,
                     min_words,
                     min_chars,
                     max_text_chars,

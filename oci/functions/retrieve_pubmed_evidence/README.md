@@ -28,7 +28,7 @@ PUBMED_EMAIL=<research contact email>
 PUBMED_TOOL=mednews-thesis
 PUBMED_REQUEST_DELAY=0.4
 PUBMED_REQUEST_TIMEOUT=20
-EVIDENCE_MAX_SECONDS=150
+EVIDENCE_MAX_SECONDS=270
 ABSTRACT_MAX_CHARS=3000
 TRANSLATE_ABSTRACTS=true
 GOOGLE_TRANSLATION_SECRET_OCIDS=<OCI Vault secret OCID API 3>,<OCI Vault secret OCID API 4>
@@ -63,15 +63,17 @@ row per `record_id`, and requires `is_claim_eligible=true`, `llm_status=OK`,
 `claim_text` and `pubmed_query_en`. Record IDs with a terminal evidence result
 already present in `silver/evidence/` are skipped. Transient PubMed, network,
 timeout, and server errors remain eligible for a later retry. A claim without a
-query is left pending for a later enrichment run. When no new claims remain,
-the hourly drain automatically resumes rows whose Spanish abstracts were left
-untranslated because a prior invocation reached its time budget.
+query is left pending for a later enrichment run. During every normal
+event-driven Evidence invocation, it also uses any remaining time to resume
+rows whose Spanish abstracts were left untranslated because a prior invocation
+reached its time budget. If there are no new claims, the invocation becomes a
+translation-only drain.
 
 `EVIDENCE_MAX_ROWS=0` means that the Function selects every eligible claim that
 does not have terminal evidence and works through them until the internal time
 budget. Set a positive value only to deliberately cap a run. The legacy
-`EVIDENCE_BATCH_SIZE` variable is not used as an invocation cap. The 150-second
-budget leaves a safety margin before OCI's 300-second synchronous
+`EVIDENCE_BATCH_SIZE` variable is not used as an invocation cap. The 270-second
+budget still leaves a safety margin before OCI's 300-second synchronous
 limit, waits 0.4 seconds between PubMed requests, translates abstracts in
 groups of 2, and alternates the two configured translation keys, using the
 other key as failover when a project quota or transient provider error occurs.

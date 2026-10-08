@@ -19,11 +19,12 @@ antes cuando alcanza las 50 filas nuevas. Cada solicitud adicional consume un
 crédito de NewsData, por lo que no se dejan ocho páginas por grupo como valor
 predeterminado.
 
-Además, `extract-news-body`, `extract-claims` y
-`retrieve-pubmed-evidence` tienen un drenaje horario (`0 * * * *`, UTC). Esas
-invocaciones no recolectan noticias: recorren los CSV pendientes, completan los
-lotes que no alcanzaron a procesarse y reintentan únicamente los errores
-transitorios. Si no hay trabajo pendiente, terminan sin escribir un CSV nuevo.
+Las etapas posteriores se encadenan mediante OCI Events: cada nueva entrada
+Bronze activa Body, cada salida de Body activa Claims y cada salida de Claims
+activa Evidence. Body y Claims conservan además su drenaje horario para
+recuperar trabajo transitorio. Evidence no tiene un schedule separado: usa el
+tiempo restante de su invocación por Events para continuar traducciones
+pendientes.
 
 ## Permisos y activación de los schedules
 
@@ -65,13 +66,13 @@ segundos para terminar la escritura del objeto:
 NEWSDATA_MAX_SECONDS=150       NEWSDATA_TIME_BUFFER=10
 BODY_MAX_SECONDS=150           BODY_TIME_BUFFER=10
 LLM_MAX_SECONDS=150            LLM_TIME_BUFFER=10
-EVIDENCE_MAX_SECONDS=150
+EVIDENCE_MAX_SECONDS=270
 ```
 
 Los valores son límites de trabajo, no duraciones garantizadas. El lote real
 puede ser menor si las URLs son lentas, si el proveedor agota la cuota o si ya
 existe el `record_id`. Cada Function escribe las filas que alcanzó a completar
-y el drenaje horario continúa con las pendientes. Para invocación manual usa
+y los estados transitorios continúan en la siguiente activación aplicable. Para invocación manual usa
 `--read-timeout 360`; ese parámetro pertenece al cliente OCI y no amplía el
 límite de 300 segundos de la Function.
 
@@ -107,11 +108,12 @@ No se debe configurar el prefijo genérico `SILVER_PREFIX=silver`: produciría
 `silver/body_<run_id>.csv`, que no coincide con la regla Events
 `silver/body/*.csv` y corta la cadena automática.
 
-Claims y evidence recorren todos los pendientes en una invocación y detienen el
+Claims y Evidence recorren los pendientes en una invocación y detienen el
 trabajo al alcanzar el presupuesto interno. Las solicitudes individuales siguen
-siendo pequeñas: claims envía 10 filas por llamada Gemini y evidence traduce en
-grupos de 2 abstracts. El drenaje horario cubre lo que no terminó por tiempo,
-cuota o error transitorio.
+siendo pequeñas: Claims envía 10 filas por llamada Gemini y Evidence traduce en
+grupos de 2 abstracts. Evidence aprovecha el tiempo restante de cada
+invocación por Events para continuar traducciones pendientes; no existe un
+schedule Evidence separado.
 
 Evidence guarda hasta 10 candidatos PubMed dentro de
 `pubmed_results_json`. Eso son diez candidatos por claim, no diez filas
@@ -144,7 +146,7 @@ asigna en Label Studio.
   retrasarse por la cola del servicio.
 - **Events y Object Storage:** Events es asíncrono y puede entregar un evento
   después de un retry; Object Storage usa prefijos, no carpetas POSIX. La
-  deduplicación por `record_id` y el drenaje horario hacen segura la repetición.
+  deduplicación por `record_id` y los drenajes de Body/Claims hacen segura la repetición.
 
 Enlaces oficiales y detalles de cada límite: [OCI Functions](https://docs.oracle.com/en-us/iaas/Content/Functions/Tasks/functionscustomizing.htm),
 [Resource Scheduler](https://docs.oracle.com/en-us/iaas/Content/resource-scheduler/tasks/create-manage.htm),
