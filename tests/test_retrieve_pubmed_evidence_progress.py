@@ -32,18 +32,12 @@ def _load_module() -> types.ModuleType:
             sys.modules["fdk"] = previous_fdk
 
 
-def test_no_new_claims_switches_to_translation_drain() -> None:
+def test_no_new_claims_stays_in_event_mode() -> None:
     module = _load_module()
 
-    assert module._next_mode_after_claim_selection("retrieve", []) == "translate_existing"
-    assert module._next_mode_after_claim_selection("retrieve", [{"record_id": "new"}]) == "retrieve"
-
-
-def test_deferred_translation_requires_a_safe_provider_window() -> None:
-    module = _load_module()
-
-    assert module._has_time_for_deferred_translation(35.0, 30.0)
-    assert not module._has_time_for_deferred_translation(34.9, 30.0)
+    selected, metadata = module._select_claims([], set(), 0)
+    assert selected == []
+    assert metadata["selected"] == 0
 
 
 def test_evidence_rejection_reason_is_explicit() -> None:

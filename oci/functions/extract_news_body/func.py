@@ -1,11 +1,9 @@
-"""Extract article bodies from pending Bronze rows into the Silver layer.
+"""Extract bodies for exactly the Bronze object that triggered OCI Events.
 
-The function treats 50 as a maximum number of rows per invocation, not as a
-file boundary. It walks Bronze CSVs in lexical (run-time) order, skips
-record_ids already present in Silver, and fills the batch from the next CSV
-when the current one contains fewer pending rows. A time budget stops the
-invocation early so a slow publisher cannot consume the OCI Functions limit;
-all rows attempted before that deadline are still written to Silver.
+Each Object Storage event is a single pipeline run: ``bronze/*.csv`` becomes
+one ``silver/body/*.csv``.  The handler never fills an event's batch with a
+pending row from an older Bronze object, so a previous publisher failure cannot
+displace a new article from the current scheduled run.
 """
 
 from __future__ import annotations
@@ -22,7 +20,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import oci
@@ -60,10 +58,9 @@ SILVER_FIELDS = BRONZE_FIELDS + [
     "extraction_error",
 ]
 
-# Publishers frequently reject a first automated request or return a temporary
-# redirect while applying their own bot/rate-limit controls.  Keep those rows
-# pending so a later event-driven Body invocation can try them again instead of
-# silently treating them as terminal.
+# Publishers can reject a first automated request or return a temporary
+# redirect. Retrying is limited to this one invocation; later runs never pick
+# up this row automatically.
 RETRYABLE_HTTP_STATUS = {307, 308, 403, 408, 425, 429, 500, 502, 503, 504}
 REDIRECT_HTTP_STATUS = {301, 302, 303, 307, 308}
 DEFAULT_BODY_SELECTORS = (
@@ -165,91 +162,102 @@ def _read_csv_object(
     ]
 
 
-def _existing_silver_ids(
+def _event_object_name(data: io.BytesIO | None, bucket: str, prefix: str) -> str:
+    """Read and validate the single Object Storage object in an OCI Event."""
+
+    if data is None:
+        raise RuntimeError("Object Storage event payload is required")
+    raw = data.read()
+    if not raw:
+        raise RuntimeError("Object Storage event payload is empty")
+    try:
+        payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Object Storage event payload is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Object Storage event payload must be an object")
+
+    event_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    details = event_data.get("additionalDetails", {})
+    if not isinstance(details, dict):
+        details = {}
+    event_bucket = str(
+        details.get("bucketName") or event_data.get("bucketName") or payload.get("bucketName") or ""
+    ).strip()
+    if event_bucket and event_bucket != bucket:
+        raise RuntimeError(f"Event bucket {event_bucket!r} does not match configured bucket {bucket!r}")
+
+    candidates = (
+        event_data.get("resourceName"),
+        details.get("objectName"),
+        details.get("resourceName"),
+        event_data.get("objectName"),
+        payload.get("source_object"),
+        payload.get("object_name"),
+    )
+    expected_prefix = f"{prefix.strip('/')}/"
+    for candidate in candidates:
+        object_name = unquote(str(candidate or "")).lstrip("/")
+        if object_name.startswith(expected_prefix) and object_name.endswith(".csv"):
+            return object_name
+    raise RuntimeError(f"Event does not identify a CSV under {expected_prefix}")
+
+
+def _event_rows(
     client: Any,
     namespace: str,
     bucket: str,
-    prefix: str,
-) -> set[str]:
-    """Return record_ids with terminal body results.
-
-    Successful and permanently unusable URLs are kept out of later batches.
-    Timeouts, connection failures, throttling, and server errors remain
-    eligible for a later scheduled retry.
-    """
-
-    def terminal(row: dict[str, str]) -> bool:
-        status = row.get("extraction_status", "").strip().upper()
-        if status in {"OK", "CUERPO_INSUFICIENTE"}:
-            return True
-        if status == "HTTP_ERROR":
-            try:
-                http_status = int(row.get("http_status", "0"))
-            except ValueError:
-                http_status = 0
-            return http_status not in RETRYABLE_HTTP_STATUS
-        if status == "URL_ERROR":
-            return "url must use" in row.get("extraction_error", "").lower()
-        return status == "ERROR" and bool(row.get("extraction_error", "").strip())
-
-    record_ids: set[str] = set()
-    for object_name in _list_csv_objects(client, namespace, bucket, prefix):
-        for row in _read_csv_object(client, namespace, bucket, object_name):
-            record_id = row.get("record_id", "").strip()
-            if record_id and terminal(row):
-                record_ids.add(record_id)
-    return record_ids
-
-
-def _pending_rows(
-    client: Any,
-    namespace: str,
-    bucket: str,
-    bronze_prefix: str,
-    silver_prefix: str,
+    object_name: str,
     batch_size: int,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """Collect pending rows across Bronze files until the batch is full."""
+    """Read valid rows from one triggering Bronze CSV without cross-run scans."""
 
-    processed_ids = _existing_silver_ids(client, namespace, bucket, silver_prefix)
-    selected_ids: set[str] = set()
     selected: list[dict[str, str]] = []
-    rows_seen = 0
-    skipped_existing = 0
-    bronze_objects = _list_csv_objects(client, namespace, bucket, bronze_prefix)
-
-    for object_name in bronze_objects:
-        for source_row in _read_csv_object(client, namespace, bucket, object_name):
-            rows_seen += 1
-            record_id = source_row.get("record_id", "").strip()
-            canonical_url = source_row.get("canonical_url", "").strip()
-            if not record_id or not canonical_url:
-                continue
-            if record_id in processed_ids or record_id in selected_ids:
-                skipped_existing += 1
-                continue
-            selected_ids.add(record_id)
-            selected.append(
-                {
-                    field: source_row.get(field, "").strip()
-                    for field in BRONZE_FIELDS
-                }
-                | {"source_bronze_object": object_name}
-            )
-            if len(selected) >= batch_size:
-                return selected, {
-                    "bronze_objects_scanned": len(bronze_objects),
-                    "bronze_rows_seen": rows_seen,
-                    "skipped_existing": skipped_existing,
-                    "silver_record_ids": len(processed_ids),
-                }
-
+    invalid_rows = 0
+    seen_ids: set[str] = set()
+    source_rows = _read_csv_object(client, namespace, bucket, object_name)
+    for source_row in source_rows:
+        record_id = source_row.get("record_id", "").strip()
+        canonical_url = source_row.get("canonical_url", "").strip()
+        if not record_id or not canonical_url or record_id in seen_ids:
+            invalid_rows += 1
+            continue
+        seen_ids.add(record_id)
+        selected.append(
+            {field: source_row.get(field, "").strip() for field in BRONZE_FIELDS}
+            | {"source_bronze_object": object_name}
+        )
+    if batch_size and len(selected) > batch_size:
+        raise RuntimeError(
+            f"Event object {object_name} has {len(selected)} valid rows, exceeding BODY_BATCH_SIZE={batch_size}"
+        )
     return selected, {
-        "bronze_objects_scanned": len(bronze_objects),
-        "bronze_rows_seen": rows_seen,
-        "skipped_existing": skipped_existing,
-        "silver_record_ids": len(processed_ids),
+        "source_object": object_name,
+        "bronze_objects_scanned": 1,
+        "bronze_rows_seen": len(source_rows),
+        "invalid_or_duplicate_rows": invalid_rows,
     }
+
+
+def _time_budget_row(source_row: dict[str, str], run_id: str) -> dict[str, str]:
+    """Persist an explicit outcome instead of silently dropping a source row."""
+
+    output = {field: source_row.get(field, "") for field in BRONZE_FIELDS}
+    output.update(
+        {
+            "body": "",
+            "http_status": "",
+            "extraction_method": "",
+            "extraction_status": "ERROR",
+            "body_char_count": "0",
+            "body_word_count": "0",
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
+            "source_bronze_object": source_row.get("source_bronze_object", ""),
+            "extraction_run_id": run_id,
+            "extraction_error": "BODY_TIME_BUDGET",
+        }
+    )
+    return output
 
 
 def _decode_html(raw: bytes, content_type: str) -> str:
@@ -505,18 +513,19 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             raise RuntimeError("BODY_TIME_BUFFER must be smaller than BODY_MAX_SECONDS")
 
         client = _object_storage_client()
-        pending, scan_meta = _pending_rows(
+        source_object = _event_object_name(data, bucket, bronze_prefix)
+        pending, scan_meta = _event_rows(
             client,
             namespace,
             bucket,
-            bronze_prefix,
-            silver_prefix,
+            source_object,
             batch_size,
         )
         deadline = started + max_seconds - time_buffer
         output_rows: list[dict[str, str]] = []
-        for source_row in pending:
+        for index, source_row in enumerate(pending):
             if time.monotonic() >= deadline:
+                output_rows.extend(_time_budget_row(row, run_id) for row in pending[index:])
                 break
             output_rows.append(
                 _extract_row(
@@ -550,9 +559,10 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "run_id": run_id,
             "bucket": bucket,
             "object_name": object_name,
+            "source_object": source_object,
             "row_count": str(len(output_rows)),
-            "selected_pending_rows": str(len(pending)),
-            "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
+            "selected_event_rows": str(len(pending)),
+            "rows_left_for_next_run": "0",
             "ok_rows": str(statuses.get("OK", 0)),
             "insufficient_rows": str(statuses.get("CUERPO_INSUFICIENTE", 0)),
             "error_rows": str(sum(value for key, value in statuses.items() if key not in {"OK", "CUERPO_INSUFICIENTE"})),
