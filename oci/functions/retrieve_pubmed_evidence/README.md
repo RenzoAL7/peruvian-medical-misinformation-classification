@@ -7,8 +7,8 @@ English candidates with OCI Generative AI `cohere.embed-v4.0`, translates only
 the returned abstracts with a separate Gemini secret, and writes one CSV row
 per claim under `silver/evidence/`. The top-k articles are stored in the
 `pubmed_results_json` column, so ten candidates per claim remain inside that
-row instead of becoming ten extra CSV rows. The Function can drain all pending
-claims in one invocation.
+row instead of becoming ten extra CSV rows. Each Object Storage event is scoped
+to one Claims CSV, so the Function processes only that file's eligible claims.
 
 This Function does not assign a truth label. `evidence_status=OK` means that
 PubMed returned candidate records, not that the news claim is supported. The
@@ -29,15 +29,17 @@ PUBMED_EMAIL=<research contact email>
 PUBMED_TOOL=mednews-thesis
 PUBMED_REQUEST_DELAY=0.4
 PUBMED_REQUEST_TIMEOUT=20
-EVIDENCE_MAX_SECONDS=270
-ABSTRACT_MAX_CHARS=3000
+EVIDENCE_MAX_SECONDS=295
+EVIDENCE_TIME_BUFFER=5
+ABSTRACT_MAX_CHARS=1500
 TRANSLATE_ABSTRACTS=true
 GOOGLE_TRANSLATION_SECRET_OCIDS=<OCI Vault secret OCID API 3>,<OCI Vault secret OCID API 4>
 # GOOGLE_TRANSLATION_SECRET_OCID remains supported for one key.
 TRANSLATION_MODEL_ID=gemini-3.5-flash-lite
-TRANSLATION_BATCH_SIZE=2
-TRANSLATION_MAX_TOKENS=5000
+TRANSLATION_BATCH_SIZE=1
+TRANSLATION_MAX_TOKENS=8000
 TRANSLATION_REQUEST_TIMEOUT=30
+TRANSLATION_PARALLELISM=2
 EMBEDDINGS_ENABLED=true
 GENAI_COMPARTMENT_ID=<OCI compartment OCID allowed to use Generative AI>
 EMBEDDING_REGION=us-ashburn-1
@@ -59,25 +61,23 @@ row.
 
 ## Selection and deduplication
 
-The Function scans all CSVs in `silver/claims/`, chooses the latest complete
-row per `record_id`, and requires `is_claim_eligible=true`, `llm_status=OK`,
-`claim_text` and `pubmed_query_en`. Record IDs with a terminal evidence result
-already present in `silver/evidence/` are skipped. Transient PubMed, network,
-timeout, and server errors remain eligible for a later retry. A claim without a
-query is left pending for a later enrichment run. During every normal
-event-driven Evidence invocation, it also uses any remaining time to resume
-rows whose Spanish abstracts were left untranslated because a prior invocation
-reached its time budget. If there are no new claims, the invocation becomes a
-translation-only drain.
+The Function reads the single `silver/claims/*.csv` named by the OCI Event and
+requires `is_claim_eligible=true`, `llm_status=OK`, `claim_text`, and
+`pubmed_query_en`. Record IDs already written to Evidence or rejected Evidence
+are skipped only to make duplicate delivery of that same event idempotent.
+It never scans another Claims file to fill the current run. PubMed, network,
+timeout, and translation failures are recorded explicitly in that run; no
+hourly drain or global retry is used.
 
-`EVIDENCE_MAX_ROWS=0` means that the Function selects every eligible claim that
-does not have terminal evidence and works through them until the internal time
-budget. Set a positive value only to deliberately cap a run. The legacy
-`EVIDENCE_BATCH_SIZE` variable is not used as an invocation cap. The 270-second
-budget still leaves a safety margin before OCI's 300-second synchronous
-limit, waits 0.4 seconds between PubMed requests, translates abstracts in
-groups of 2, and alternates the two configured translation keys, using the
-other key as failover when a project quota or transient provider error occurs.
+`EVIDENCE_MAX_ROWS=0` means that the Function selects every eligible claim in
+the triggering object. Set a positive value only to deliberately cap a run; a
+cap smaller than the event file is rejected instead of silently deferring rows.
+The 295-second budget leaves five seconds to persist the final CSV before OCI's
+300-second synchronous limit. It waits 0.4 seconds between PubMed requests,
+then translates one abstract at a time on up to two Gemini keys in parallel.
+This uses both configured projects while keeping requests small enough to
+return a per-abstract result. The second key also acts as failover for quota or
+transient provider errors.
 The Embed 4 requests are chunked by input count and a conservative 100,000-token
 estimate so a large set of claims does not exceed the model input limit. See
 [`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md) for the
@@ -118,29 +118,13 @@ retries that PMID with a faithful Spanish paraphrase and marks the nested
 candidate `translation_status` as `PARAPHRASED`; the English source remains
 unchanged for review.
 
-Rows written before translation was enabled can be enriched without another
-PubMed search:
-
-```bash
-oci fn function invoke \
-  --function-id <retrieve-pubmed-evidence-function-ocid> \
-  --file - \
-  --body '{"mode":"translate_existing"}' \
-  --region us-ashburn-1 \
-  --read-timeout 360
-```
-
-The migration writes `evidence_translated_<run_id>.csv` in the same
-`silver/evidence/` prefix. It skips rows already translated and leaves English
-evidence intact if the translation quota or network is unavailable.
-
 ## Manual invocation
 
 ```bash
 oci fn function invoke \
   --function-id <retrieve-pubmed-evidence-function-ocid> \
   --file - \
-  --body '' \
+  --body '{"data":{"resourceName":"silver/claims/<input>.csv","additionalDetails":{"bucketName":"mednews-data"}}}' \
   --region us-ashburn-1 \
   --read-timeout 360
 ```

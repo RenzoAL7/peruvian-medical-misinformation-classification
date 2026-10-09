@@ -1,13 +1,12 @@
-"""Extract auditable medical claims from valid Silver article bodies.
+"""Extract auditable claims from the one Silver/Body object in an OCI Event.
 
 This Function is deliberately a candidate-generation step.  It does not decide
 whether a claim is true or false.  Rows whose body extraction failed, is too
 short, or is missing are excluded before the LLM call.  Several valid rows are
 sent in one Gemini request to reduce API calls and rate-limit pressure.  The
-structured responses are written to a new CSV under ``silver/claims/``. One
-invocation drains all eligible body rows by sending bounded request batches
-until the time budget is reached; the second Gemini project key is rotated
-through those requests and used as failover.
+structured responses are written to a new CSV under ``silver/claims/``. The
+input is scoped to the ``silver/body/*.csv`` object that triggered the
+Function, so a previous run cannot be pulled into the current event.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote
 
 import oci
 from fdk import response
@@ -275,15 +275,55 @@ def _existing_claim_ids(client: Any, namespace: str, bucket: str, prefix: str) -
     return record_ids
 
 
-def _pending_rows(
+def _event_object_name(data: io.BytesIO | None, bucket: str, prefix: str) -> str:
+    """Read and validate the single Object Storage object in an OCI Event."""
+
+    if data is None:
+        raise RuntimeError("Object Storage event payload is required")
+    raw = data.read()
+    if not raw:
+        raise RuntimeError("Object Storage event payload is empty")
+    try:
+        payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Object Storage event payload is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Object Storage event payload must be an object")
+
+    event_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    details = event_data.get("additionalDetails", {})
+    if not isinstance(details, dict):
+        details = {}
+    event_bucket = str(
+        details.get("bucketName") or event_data.get("bucketName") or payload.get("bucketName") or ""
+    ).strip()
+    if event_bucket and event_bucket != bucket:
+        raise RuntimeError(f"Event bucket {event_bucket!r} does not match configured bucket {bucket!r}")
+
+    expected_prefix = f"{prefix.strip('/')}/"
+    for candidate in (
+        event_data.get("resourceName"),
+        details.get("objectName"),
+        details.get("resourceName"),
+        event_data.get("objectName"),
+        payload.get("source_object"),
+        payload.get("object_name"),
+    ):
+        object_name = unquote(str(candidate or "")).lstrip("/")
+        if object_name.startswith(expected_prefix) and object_name.endswith(".csv"):
+            return object_name
+    raise RuntimeError(f"Event does not identify a CSV under {expected_prefix}")
+
+
+def _event_rows(
     client: Any,
     namespace: str,
     bucket: str,
-    body_prefix: str,
+    object_name: str,
     claims_prefix: str,
     max_rows: int,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """Select valid, not-yet-attempted bodies across all Silver CSVs."""
+    """Select valid, not-yet-attempted bodies from one triggering CSV."""
 
     attempted_ids = _existing_claim_ids(client, namespace, bucket, claims_prefix)
     selected_ids: set[str] = set()
@@ -298,34 +338,34 @@ def _pending_rows(
             "claims_record_ids": len(attempted_ids),
         }
     )
-    body_objects = _list_csv_objects(client, namespace, bucket, body_prefix)
-    stats["body_objects_scanned"] = len(body_objects)
-
-    for object_name in body_objects:
-        for source_row in _read_csv_object(client, namespace, bucket, object_name):
-            stats["body_rows_seen"] += 1
-            record_id = source_row.get("record_id", "").strip()
-            body = source_row.get("body", "").strip()
-            extraction_status = source_row.get("extraction_status", "").strip().upper()
-            if not record_id or not body:
-                stats["skipped_no_body"] += 1
-                continue
-            if extraction_status != "OK":
-                stats["skipped_extraction_error"] += 1
-                continue
-            if record_id in attempted_ids or record_id in selected_ids:
-                stats["skipped_duplicate"] += 1
-                continue
-            selected_ids.add(record_id)
-            selected.append(
-                {
-                    field: source_row.get(field, "").strip()
-                    for field in BRONZE_FIELDS + BODY_FIELDS
-                }
-                | {"source_silver_object": object_name}
-            )
-            if max_rows > 0 and len(selected) >= max_rows:
-                return selected, dict(stats)
+    source_rows = _read_csv_object(client, namespace, bucket, object_name)
+    stats["body_objects_scanned"] = 1
+    for source_row in source_rows:
+        stats["body_rows_seen"] += 1
+        record_id = source_row.get("record_id", "").strip()
+        body = source_row.get("body", "").strip()
+        extraction_status = source_row.get("extraction_status", "").strip().upper()
+        if not record_id or not body:
+            stats["skipped_no_body"] += 1
+            continue
+        if extraction_status != "OK":
+            stats["skipped_extraction_error"] += 1
+            continue
+        if record_id in attempted_ids or record_id in selected_ids:
+            stats["skipped_duplicate"] += 1
+            continue
+        selected_ids.add(record_id)
+        selected.append(
+            {
+                field: source_row.get(field, "").strip()
+                for field in BRONZE_FIELDS + BODY_FIELDS
+            }
+            | {"source_silver_object": object_name}
+        )
+    if max_rows > 0 and len(selected) > max_rows:
+        raise RuntimeError(
+            f"Event object {object_name} has {len(selected)} eligible rows, exceeding LLM_MAX_ROWS={max_rows}"
+        )
 
     return selected, dict(stats)
 
@@ -662,173 +702,6 @@ def _call_llm_batch(
     raise RuntimeError(f"LLM call failed: {type(last_error).__name__}: {last_error}") from last_error
 
 
-def _pending_query_rows(
-    client: Any,
-    namespace: str,
-    bucket: str,
-    claims_prefix: str,
-    max_rows: int,
-) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """Select existing eligible claims that predate the English query fields."""
-
-    rows: list[dict[str, str]] = []
-    for object_name in _list_csv_objects(client, namespace, bucket, claims_prefix):
-        rows.extend(_read_csv_object(client, namespace, bucket, object_name))
-
-    completed: set[str] = set()
-    for row in rows:
-        record_id = row.get("record_id", "").strip()
-        if (
-            record_id
-            and row.get("is_claim_eligible", "").strip().lower() == "true"
-            and row.get("claim_text", "").strip()
-            and row.get("pubmed_query_en", "").strip()
-            and row.get("query_status", "").strip().upper() == "OK"
-        ):
-            completed.add(record_id)
-
-    selected: list[dict[str, str]] = []
-    seen: set[str] = set()
-    skipped_ineligible = 0
-    skipped_completed = 0
-    for row in rows:
-        record_id = row.get("record_id", "").strip()
-        eligible = row.get("is_claim_eligible", "").strip().lower() == "true"
-        claim_text = row.get("claim_text", "").strip()
-        if not record_id or not eligible or not claim_text:
-            skipped_ineligible += 1
-            continue
-        if record_id in completed or record_id in seen:
-            skipped_completed += 1
-            continue
-        seen.add(record_id)
-        selected.append({field: row.get(field, "").strip() for field in OUTPUT_FIELDS})
-        if max_rows > 0 and len(selected) >= max_rows:
-            break
-    return selected, {
-        "claims_rows_seen": len(rows),
-        "eligible_rows_pending": len(selected),
-        "claims_query_completed": len(completed),
-        "skipped_ineligible": skipped_ineligible,
-        "skipped_completed": skipped_completed,
-    }
-
-
-def _build_query_enrichment_prompt(rows: list[dict[str, str]]) -> str:
-    items: list[str] = []
-    for index, row in enumerate(rows, start=1):
-        items.append(
-            f"""CLAIM {index}
-record_id (copia exactamente): {row.get('record_id', '')}
-Claim en español: {row.get('claim_text', '')}
-Tipo de claim: {row.get('claim_type', 'otro')}
-"""
-        )
-    return f"""Eres un asistente de recuperación bibliográfica para un corpus académico de noticias médicas en español.
-
-Para cada claim, devuelve únicamente un objeto JSON válido con esta forma:
-{{
-  "items": [
-    {{
-      "record_id": "el record_id de entrada",
-      "claim_text_en": "traducción fiel al inglés",
-      "pubmed_query_en": "consulta concisa para PubMed usando términos biomédicos y AND/OR"
-    }}
-  ]
-}}
-
-Reglas:
-- Devuelve exactamente un item por cada claim y conserva el orden.
-- Conserva cada record_id exactamente.
-- Traduce el significado sin añadir datos ni cambiar la fuerza de la afirmación.
-- La query debe buscar el claim, no verificarlo ni concluir si es verdadero o falso.
-- Usa frases biomédicas en inglés y operadores AND/OR; evita palabras innecesarias.
-- Mantén claim_text_en por debajo de 500 caracteres y pubmed_query_en por debajo de 600 caracteres.
-
-Claims:
-{chr(10).join(items)}
-"""
-
-
-def _ordered_query_items(document: Any, rows: list[dict[str, str]]) -> list[dict[str, Any]]:
-    items = document.get("items", document.get("results")) if isinstance(document, dict) else document
-    if not isinstance(items, list) or len(items) != len(rows):
-        raise ValueError(
-            f"LLM returned {len(items) if isinstance(items, list) else 0} query items for {len(rows)} claims"
-        )
-    if not all(isinstance(item, dict) for item in items):
-        raise ValueError("LLM query batch contains a non-object item")
-    expected_ids = [row.get("record_id", "").strip() for row in rows]
-    returned_ids = [str(item.get("record_id", "") or "").strip() for item in items]
-    if returned_ids != expected_ids and any(returned_ids):
-        raise ValueError("LLM query record_id values do not match input order")
-    return items
-
-
-def _normalize_query(payload: dict[str, Any]) -> dict[str, str]:
-    claim_text_en = re.sub(r"\s+", " ", str(payload.get("claim_text_en", "") or "")).strip()
-    pubmed_query_en = re.sub(r"\s+", " ", str(payload.get("pubmed_query_en", "") or "")).strip()
-    return {
-        "claim_text_en": claim_text_en[:1000],
-        "pubmed_query_en": pubmed_query_en[:1000],
-        "query_status": "OK" if claim_text_en and pubmed_query_en else "ERROR",
-        "query_prompt_version": QUERY_PROMPT_VERSION,
-    }
-
-
-def _call_query_batch(
-    client: Any,
-    rows: list[dict[str, str]],
-    model_id: str,
-    max_tokens: int,
-    temperature: float,
-    top_p: float,
-    retries: int,
-    deadline: float,
-    provider: str = "oci",
-    google_api_key: str = "",
-    request_timeout: float = 30.0,
-) -> list[tuple[dict[str, str], dict[str, str], str]]:
-    prompt = _build_query_enrichment_prompt(rows)
-    last_error: Exception | None = None
-    for attempt in range(retries + 1):
-        if time.monotonic() >= deadline:
-            raise TimeoutError("LLM query time budget reached")
-        try:
-            if provider == "google":
-                result = _google_gemini_request(
-                    google_api_key,
-                    model_id,
-                    prompt,
-                    max_tokens,
-                    temperature,
-                    top_p,
-                    request_timeout,
-                )
-            else:
-                result = client.chat(
-                    chat_details=_chat_request(model_id, prompt, max_tokens, temperature, top_p),
-                    retry_strategy=oci.retry.NoneRetryStrategy(),
-                )
-            raw_text = _find_response_text(result)
-            if not raw_text:
-                raise ValueError("LLM returned an empty query response")
-            items = _ordered_query_items(_json_document(raw_text), rows)
-            return [
-                (row, _normalize_query(item), json.dumps(item, ensure_ascii=False))
-                for row, item in zip(rows, items)
-            ]
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            if (
-                attempt < retries
-                and _retryable_llm_error(exc)
-                and time.monotonic() + 1.0 < deadline
-            ):
-                time.sleep(1.0)
-    raise RuntimeError(f"LLM query call failed: {type(last_error).__name__}: {last_error}") from last_error
-
-
 def _output_row(
     source_row: dict[str, str],
     claim: dict[str, str],
@@ -859,28 +732,29 @@ def _output_row(
     return output
 
 
-def _query_output_row(
+def _failed_claim_row(
     source_row: dict[str, str],
-    query: dict[str, str],
-    raw_json: str,
     run_id: str,
     model_id: str,
-    key_slot: str = "",
+    error: str,
 ) -> dict[str, str]:
-    output = {field: source_row.get(field, "") for field in OUTPUT_FIELDS}
-    output.update(query)
-    output.update(
-        {
-            "llm_raw_json": raw_json[:8000] or source_row.get("llm_raw_json", "")[:8000],
-            "model_id": source_row.get("model_id", model_id) or model_id,
-            "llm_key_slot": key_slot or source_row.get("llm_key_slot", ""),
-            "query_prompt_version": QUERY_PROMPT_VERSION,
-            "query_enriched_at": datetime.now(timezone.utc).isoformat(),
-            "query_enrichment_run_id": run_id,
-            "llm_error": "",
-        }
-    )
-    return output
+    """Persist a terminal per-run failure instead of silently leaving a body pending."""
+
+    empty_claim = {
+        "claim_text": "",
+        "claim_text_en": "",
+        "pubmed_query_en": "",
+        "query_status": "ERROR",
+        "query_prompt_version": QUERY_PROMPT_VERSION,
+        "query_enriched_at": "",
+        "query_enrichment_run_id": "",
+        "is_medical": "",
+        "is_claim_eligible": "",
+        "claim_type": "",
+        "llm_reason": "",
+        "needs_human_review": "true",
+    }
+    return _output_row(source_row, empty_claim, "", run_id, model_id, "ERROR", error=error)
 
 
 def _quota_disabled(error: Exception) -> bool:
@@ -950,9 +824,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         default_model_id = DEFAULT_GOOGLE_MODEL_ID if provider == "google" else DEFAULT_MODEL_ID
         model_id = os.getenv("LLM_MODEL_ID", default_model_id).strip() or default_model_id
         region = os.getenv("LLM_REGION", os.getenv("OCI_REGION", "us-ashburn-1")).strip()
-        # A zero max means "drain every eligible body".  The request batch
-        # remains small so each Gemini call has a bounded prompt, while the
-        # invocation can continue with the next batch until its deadline.
+        # A zero max means "process every eligible body from this event".
         max_rows = _env_int("LLM_MAX_ROWS", 0, minimum=0)
         request_batch_size = _env_int("LLM_REQUEST_BATCH_SIZE", 10, minimum=1)
         max_seconds = _env_float("LLM_MAX_SECONDS", 150.0, minimum=1.0)
@@ -966,37 +838,16 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         if time_buffer >= max_seconds:
             raise RuntimeError("LLM_TIME_BUFFER must be smaller than LLM_MAX_SECONDS")
 
-        mode = "claims"
-        if data is not None:
-            raw_request = data.read()
-            if raw_request:
-                payload = (
-                    json.loads(raw_request.decode("utf-8"))
-                    if isinstance(raw_request, bytes)
-                    else json.loads(raw_request)
-                )
-                mode = str(payload.get("mode", "claims")).strip().lower()
-        if mode not in {"claims", "enrich_queries"}:
-            raise RuntimeError("mode must be either 'claims' or 'enrich_queries'")
-
         storage = _object_storage_client()
-        if mode == "enrich_queries":
-            pending, scan_meta = _pending_query_rows(
-                storage,
-                namespace,
-                bucket,
-                claims_prefix,
-                max_rows,
-            )
-        else:
-            pending, scan_meta = _pending_rows(
-                storage,
-                namespace,
-                bucket,
-                body_prefix,
-                claims_prefix,
-                max_rows,
-            )
+        source_object = _event_object_name(data, bucket, body_prefix)
+        pending, scan_meta = _event_rows(
+            storage,
+            namespace,
+            bucket,
+            source_object,
+            claims_prefix,
+            max_rows,
+        )
         deadline = started + max_seconds - time_buffer
         output_rows: list[dict[str, str]] = []
         statuses: Counter[str] = Counter()
@@ -1027,24 +878,15 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 llm = _generative_ai_client(region, request_timeout)
             for offset in range(0, len(pending), request_batch_size):
                 if time.monotonic() >= deadline:
+                    for source_row in pending[offset:]:
+                        output_rows.append(
+                            _failed_claim_row(source_row, run_id, model_id, "LLM_TIME_BUDGET")
+                        )
+                    statuses["ERROR"] += len(pending) - offset
                     break
                 request_rows = pending[offset : offset + request_batch_size]
                 try:
                     def invoke_batch(key: str) -> list[tuple[dict[str, str], dict[str, str], str]]:
-                        if mode == "enrich_queries":
-                            return _call_query_batch(
-                                llm,
-                                request_rows,
-                                model_id,
-                                max_tokens,
-                                temperature,
-                                top_p,
-                                retries,
-                                deadline,
-                                provider=provider,
-                                google_api_key=key,
-                                request_timeout=request_timeout,
-                            )
                         return _call_llm_batch(
                             llm,
                             request_rows,
@@ -1073,31 +915,38 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                         key_slot = "oci"
                     llm_requests += 1
                     for source_row, claim, raw_json in batch_results:
-                        if mode == "enrich_queries":
-                            output_rows.append(
-                                _query_output_row(source_row, claim, raw_json, run_id, model_id, key_slot)
-                            )
-                        else:
-                            output_rows.append(
-                                _output_row(source_row, claim, raw_json, run_id, model_id, "OK", key_slot)
-                            )
+                        output_rows.append(
+                            _output_row(source_row, claim, raw_json, run_id, model_id, "OK", key_slot)
+                        )
                     statuses["OK"] += len(batch_results)
                     consecutive_errors = 0
                 except TimeoutError:
+                    for source_row in pending[offset:]:
+                        output_rows.append(
+                            _failed_claim_row(source_row, run_id, model_id, "LLM_TIME_BUDGET")
+                        )
+                    statuses["ERROR"] += len(pending) - offset
                     break
-                except Exception as exc:  # noqa: BLE001 - keep failed rows pending for a later retry
+                except Exception as exc:  # noqa: BLE001 - preserve terminal per-run errors
                     LOGGER.warning(
                         "Claim extraction failed for %s: %s",
                         ",".join(row.get("record_id", "") for row in request_rows),
                         exc,
                     )
+                    error = f"{type(exc).__name__}: {exc}"[:2000]
+                    for source_row in request_rows:
+                        output_rows.append(_failed_claim_row(source_row, run_id, model_id, error))
                     statuses["ERROR"] += len(request_rows)
-                    last_llm_error = f"{type(exc).__name__}: {exc}"[:2000]
+                    last_llm_error = error
                     consecutive_errors += 1
-                    # A disabled tenancy quota cannot be fixed by sending the
-                    # remaining rows; leave all of them pending and return
-                    # immediately instead of spending more calls/time.
+                    # A disabled quota cannot be fixed in this invocation;
+                    # preserve every remaining row with an explicit outcome.
                     if _quota_disabled(exc) or consecutive_errors >= 3:
+                        for source_row in pending[offset + len(request_rows) :]:
+                            output_rows.append(
+                                _failed_claim_row(source_row, run_id, model_id, "LLM_NOT_ATTEMPTED")
+                            )
+                        statuses["ERROR"] += len(pending) - offset - len(request_rows)
                         break
 
         object_name = ""
@@ -1109,7 +958,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                 claims_prefix,
                 output_rows,
                 run_id,
-                object_stem="claims_query_enriched" if mode == "enrich_queries" else "claims",
+                object_stem="claims",
             )
         result_status = "ok"
         if statuses.get("ERROR", 0) and not output_rows:
@@ -1118,14 +967,15 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             result_status = "partial"
         result = {
             "status": result_status,
-            "mode": mode,
+            "mode": "claims",
             "run_id": run_id,
             "bucket": bucket,
             "object_name": object_name,
+            "source_object": source_object,
             "row_count": str(len(output_rows)),
             "ok_rows": str(statuses.get("OK", 0)),
             "error_rows": str(statuses.get("ERROR", 0)),
-            "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
+            "rows_left_for_next_run": "0",
             "llm_error": last_llm_error,
             "model_id": model_id,
             "llm_provider": provider,

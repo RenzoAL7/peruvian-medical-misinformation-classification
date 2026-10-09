@@ -1,14 +1,10 @@
 # `extract-news-body`
 
-Second OCI Function in the thesis pipeline. It reads pending rows from the
-flat `bronze/` prefix, downloads each article URL, extracts the main HTML text,
-and writes one CSV batch under `silver/`.
-
-The batch is row based rather than file based. Bronze objects are sorted by
-their run name. The function consumes all pending rows in the first object
-before continuing to the next one, and fills the configured batch when an
-object contains fewer rows. For example, 23 pending rows in the first CSV and
-27 in the second produce one 50-row Silver batch.
+Second OCI Function in the thesis pipeline. An Object Storage event identifies
+one `bronze/*.csv` input object; the Function downloads the URLs in that file,
+extracts the main HTML text, and writes exactly one corresponding CSV under
+`silver/body/`. It never fills a run with pending rows from another Bronze
+object.
 
 ## OCI configuration
 
@@ -32,22 +28,21 @@ BODY_MIN_CHARS=800
 BODY_MAX_TEXT_CHARS=200000
 ```
 
-`BODY_BATCH_SIZE` is a maximum. `BODY_MAX_SECONDS` leaves a safety margin below
-the 300-second OCI Functions limit. If pages are slow, the function writes the
-rows completed before the internal deadline and the remaining Bronze rows stay
-pending for the next invocation.
+`BODY_BATCH_SIZE` must accommodate the complete Bronze file (the Fetch Function
+emits at most 50 rows). `BODY_MAX_SECONDS` leaves a safety margin below the
+300-second OCI Functions limit. If pages are slow, the output still contains an
+explicit `BODY_TIME_BUDGET` error row for every URL that could not be attempted.
 
 The usual budget is 150 seconds with `BODY_TIME_BUFFER=10`; each URL has a
 15-second request timeout and at most one retry. The elapsed time and pending
 rows are visible in the invocation log. See the consolidated limits and
 duration table in [`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md).
 
-The function follows up to five validated HTTP(S) redirects. It reads all
-existing Silver CSVs and skips `record_id` values with a terminal result.
-Timeouts, connection failures, throttling, server errors, HTTP 403, and failed
-temporary redirects remain pending so the next event-driven Body invocation can
-retry them. The output keeps every attempt with
-`extraction_status` so the decision remains auditable.
+The function follows up to five validated HTTP(S) redirects. It validates that
+the incoming event belongs to the configured bucket and `bronze/` prefix, then
+processes only that object's rows. Connection, HTTP, extraction, and time-budget
+outcomes are persisted in the output CSV with `extraction_status`; they are not
+silently retried during another run.
 
 ## Silver output
 
@@ -76,7 +71,7 @@ Function only extracts text; it never decides whether a claim is true or false.
 oci fn function invoke \
   --function-id <extract-news-body-function-ocid> \
   --file - \
-  --body '' \
+  --body '{"data":{"resourceName":"bronze/<input>.csv","additionalDetails":{"bucketName":"mednews-data"}}}' \
   --region us-ashburn-1 \
   --read-timeout 360
 ```

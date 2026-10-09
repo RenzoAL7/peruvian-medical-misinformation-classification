@@ -1,18 +1,17 @@
-"""Retrieve PubMed evidence candidates for English query-enriched claims.
+"""Retrieve PubMed evidence for the one Claims object in an OCI Event.
 
 The function is deliberately an evidence-retrieval step. It does not decide
-whether a news claim is true or false. It drains all pending claim rows that
-fit the invocation time budget, queries PubMed with ESearch, downloads all
-returned records in one EFetch request, ranks the English title and abstract
-with OCI Cohere Embed 4, and writes one output row per claim. A transparent
-Spanish TF-IDF score is kept as a diagnostic and fallback. The top-k PubMed
-candidates are stored as JSON inside that row so the CSV does not expand to one
-row per paper.
+whether a news claim is true or false. It processes only the
+``silver/claims/*.csv`` object that triggered the event, queries PubMed with
+ESearch, ranks the candidates with OCI Cohere Embed 4, translates all retained
+abstract excerpts to Spanish, and writes one output row per claim. A
+transparent Spanish TF-IDF score is kept as a diagnostic and fallback.
 """
 
 from __future__ import annotations
 
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
 import json
 import logging
@@ -30,6 +29,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote
 
 import oci
 from fdk import response
@@ -393,28 +393,67 @@ def _row_priority(row: dict[str, str]) -> tuple[int, str]:
     return (1 if _row_complete(row) else 0, timestamp)
 
 
-def _latest_claim_rows(
+def _event_object_name(data: io.BytesIO | None, bucket: str, prefix: str) -> str:
+    """Read and validate the single Object Storage object in an OCI Event."""
+
+    if data is None:
+        raise RuntimeError("Object Storage event payload is required")
+    raw = data.read()
+    if not raw:
+        raise RuntimeError("Object Storage event payload is empty")
+    try:
+        payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Object Storage event payload is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Object Storage event payload must be an object")
+
+    event_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    details = event_data.get("additionalDetails", {})
+    if not isinstance(details, dict):
+        details = {}
+    event_bucket = str(
+        details.get("bucketName") or event_data.get("bucketName") or payload.get("bucketName") or ""
+    ).strip()
+    if event_bucket and event_bucket != bucket:
+        raise RuntimeError(f"Event bucket {event_bucket!r} does not match configured bucket {bucket!r}")
+
+    expected_prefix = f"{prefix.strip('/')}/"
+    for candidate in (
+        event_data.get("resourceName"),
+        details.get("objectName"),
+        details.get("resourceName"),
+        event_data.get("objectName"),
+        payload.get("source_object"),
+        payload.get("object_name"),
+    ):
+        object_name = unquote(str(candidate or "")).lstrip("/")
+        if object_name.startswith(expected_prefix) and object_name.endswith(".csv"):
+            return object_name
+    raise RuntimeError(f"Event does not identify a CSV under {expected_prefix}")
+
+
+def _event_claim_rows(
     client: Any,
     namespace: str,
     bucket: str,
-    claims_prefix: str,
+    object_name: str,
 ) -> tuple[dict[str, dict[str, str]], dict[str, int]]:
     rows_by_id: dict[str, dict[str, str]] = {}
-    objects = _list_csv_objects(client, namespace, bucket, claims_prefix)
     rows_seen = 0
-    for object_name in objects:
-        for source_row in _read_csv_object(client, namespace, bucket, object_name):
-            rows_seen += 1
-            record_id = source_row.get("record_id", "").strip()
-            if not record_id:
-                continue
-            row = dict(source_row)
-            row["source_claims_object"] = object_name
-            previous = rows_by_id.get(record_id)
-            if previous is None or _row_priority(row) >= _row_priority(previous):
-                rows_by_id[record_id] = row
+    for source_row in _read_csv_object(client, namespace, bucket, object_name):
+        rows_seen += 1
+        record_id = source_row.get("record_id", "").strip()
+        if not record_id:
+            continue
+        row = dict(source_row)
+        row["source_claims_object"] = object_name
+        previous = rows_by_id.get(record_id)
+        if previous is None or _row_priority(row) >= _row_priority(previous):
+            rows_by_id[record_id] = row
     return rows_by_id, {
-        "claims_objects_scanned": len(objects),
+        "source_object": object_name,
+        "claims_objects_scanned": 1,
         "claims_rows_seen": rows_seen,
         "unique_claims": len(rows_by_id),
     }
@@ -427,34 +466,7 @@ def _existing_evidence_ids(
     evidence_prefix: str,
     rejected_prefix: str = "",
 ) -> set[str]:
-    """Return evidence rows that are terminal and should not be retried.
-
-    Transient PubMed or embedding failures are written for auditability but do
-    not block a later scheduled run from retrying the claim.
-    """
-
-    def terminal(row: dict[str, str]) -> bool:
-        status = row.get("evidence_status", "").strip().upper()
-        if status in {"OK", "NO_RESULTS", "NO_ABSTRACT"}:
-            return True
-        if status != "ERROR":
-            return False
-        error = row.get("evidence_error", "").lower()
-        transient = (
-            "http 408",
-            "http 425",
-            "http 429",
-            "http 500",
-            "http 502",
-            "http 503",
-            "http 504",
-            "timeout",
-            "timed out",
-            "temporarily unavailable",
-            "network error",
-            "time_budget",
-        )
-        return not any(marker in error for marker in transient)
+    """Return all evidence attempts so duplicate Events cannot reprocess rows."""
 
     record_ids: set[str] = set()
     prefixes = [evidence_prefix] + ([rejected_prefix] if rejected_prefix else [])
@@ -462,7 +474,7 @@ def _existing_evidence_ids(
         for object_name in _list_csv_objects(client, namespace, bucket, prefix):
             for row in _read_csv_object(client, namespace, bucket, object_name):
                 record_id = row.get("record_id", "").strip()
-                if record_id and terminal(row):
+                if record_id:
                     record_ids.add(record_id)
     return record_ids
 
@@ -494,8 +506,10 @@ def _select_claims(
             stats["skipped_missing_query"] += 1
             continue
         selected.append(row)
-        if max_rows > 0 and len(selected) >= max_rows:
-            break
+    if max_rows > 0 and len(selected) > max_rows:
+        raise RuntimeError(
+            f"Event object has {len(selected)} eligible claims, exceeding EVIDENCE_MAX_ROWS={max_rows}"
+        )
     stats["selected"] = len(selected)
     return selected, dict(stats)
 
@@ -952,96 +966,6 @@ def _rerank_candidates(row: dict[str, str]) -> int:
     return len(scored)
 
 
-def _translation_complete(row: dict[str, str]) -> bool:
-    status = row.get("translation_status", "").strip().upper()
-    if status in {"OK", "NO_ABSTRACTS", "SKIPPED_NO_EVIDENCE"}:
-        return True
-    if row.get("evidence_status", "").strip().upper() in {"NO_RESULTS", "NO_ABSTRACT"}:
-        return True
-    try:
-        candidates = _candidate_list(row)
-    except ValueError:
-        return False
-    return bool(candidates) and all(
-        not str(candidate.get("abstract_excerpt", "") or "").strip()
-        or bool(str(candidate.get("abstract_es", "") or "").strip())
-        for candidate in candidates
-    )
-
-
-def _next_mode_after_claim_selection(mode: str, pending_claims: list[dict[str, str]]) -> str:
-    """Drain deferred abstract translations once retrieval has no new work.
-
-    Evidence rows remain terminal for PubMed retrieval after candidates have
-    been saved, even if their Spanish translations ran out of time. Without
-    this handoff, the hourly invocation finds no new claims and never resumes
-    those deferred translations.
-    """
-
-    if mode == "retrieve" and not pending_claims:
-        return "translate_existing"
-    return mode
-
-
-def _has_time_for_deferred_translation(remaining_seconds: float, request_timeout: float) -> bool:
-    """Avoid starting another provider request without a safe completion window."""
-
-    return remaining_seconds >= request_timeout + 5.0
-
-
-def _pending_translation_rows(
-    client: Any,
-    namespace: str,
-    bucket: str,
-    evidence_prefix: str,
-    max_rows: int,
-) -> tuple[list[dict[str, str]], dict[str, int]]:
-    latest: dict[str, dict[str, str]] = {}
-    objects = _list_csv_objects(client, namespace, bucket, evidence_prefix)
-    rows_seen = 0
-    for object_name in objects:
-        for source_row in _read_csv_object(client, namespace, bucket, object_name):
-            rows_seen += 1
-            record_id = source_row.get("record_id", "").strip()
-            if not record_id:
-                continue
-            previous = latest.get(record_id)
-            if previous is None or (not _translation_complete(previous) and _translation_complete(source_row)):
-                latest[record_id] = dict(source_row)
-            elif previous is not None and not _translation_complete(previous):
-                latest[record_id] = dict(source_row)
-
-    selected: list[dict[str, str]] = []
-    skipped_complete = 0
-    skipped_no_abstracts = 0
-    for record_id in sorted(latest):
-        row = latest[record_id]
-        if _translation_complete(row):
-            skipped_complete += 1
-            continue
-        try:
-            has_abstract = any(
-                str(candidate.get("abstract_excerpt", "") or "").strip()
-                for candidate in _candidate_list(row)
-            )
-        except ValueError:
-            has_abstract = False
-        if not has_abstract:
-            skipped_no_abstracts += 1
-            continue
-        selected.append({field: row.get(field, "") for field in OUTPUT_FIELDS})
-        if max_rows > 0 and len(selected) >= max_rows:
-            break
-    return selected, {
-        "evidence_objects_scanned": len(objects),
-        "evidence_rows_seen": rows_seen,
-        "unique_evidence_rows": len(latest),
-        "skipped_translation_complete": skipped_complete,
-        "skipped_no_abstracts": skipped_no_abstracts,
-        "selected": len(selected),
-    }
-
-
 def _apply_translations(
     rows: list[dict[str, str]],
     api_keys: list[str] | str,
@@ -1053,12 +977,14 @@ def _apply_translations(
     run_id: str,
     enabled: bool,
     configuration_error: str = "",
+    parallelism: int = 1,
 ) -> dict[str, Any]:
     if isinstance(api_keys, str):
         api_keys = [api_keys] if api_keys else []
     api_keys = list(api_keys)
     key_cursor = 0
     stats: Counter[str] = Counter()
+    parallelism = min(max(1, parallelism), len(api_keys)) if api_keys else 1
 
     def translate_with_failover(
         batch_rows: list[dict[str, str]],
@@ -1114,6 +1040,72 @@ def _apply_translations(
         for row in rows
         if row.get("translation_status") not in {"SKIPPED_NO_EVIDENCE", "NO_ABSTRACTS", "DISABLED", "NOT_CONFIGURED", "ERROR"}
     ]
+
+    def apply_mapping(
+        batch_rows: list[dict[str, str]],
+        translated: dict[str, dict[str, str]],
+        used_slot: int,
+    ) -> None:
+        for row in batch_rows:
+            row["translation_key_slot"] = str(used_slot + 1)
+            mapping = translated.get(row.get("record_id", ""), {})
+            translated_count, missing_count, scored = _apply_translation_mapping(row, mapping)
+            if missing_count:
+                stats["translation_errors"] += 1
+            stats["translated_abstracts"] += translated_count
+            stats["scored_rows"] += int(scored)
+
+    # One row contains all of its PubMed candidates.  With two independent
+    # Gemini projects, send one complete row per key concurrently.  This avoids
+    # a large multi-row response exceeding its output limit and gives every
+    # final evidence row a realistic chance to finish inside one Function run.
+    if parallelism > 1 and pending:
+        batches = [pending[index : index + batch_size] for index in range(0, len(pending), batch_size)]
+        for offset in range(0, len(batches), parallelism):
+            wave = batches[offset : offset + parallelism]
+            if deadline - time.monotonic() < timeout + 5.0:
+                for remaining in batches[offset:]:
+                    for row in remaining:
+                        row["translation_status"] = "TIME_BUDGET"
+                        row["translation_error"] = "Translation time budget reached"
+                        stats["translation_errors"] += 1
+                break
+            with ThreadPoolExecutor(max_workers=len(wave)) as executor:
+                futures = {
+                    executor.submit(
+                        _translate_batch,
+                        api_keys[(offset + index) % len(api_keys)],
+                        model_id,
+                        batch,
+                        max_tokens,
+                        timeout,
+                    ): (batch, (offset + index) % len(api_keys))
+                    for index, batch in enumerate(wave)
+                }
+                for future in as_completed(futures):
+                    batch, preferred_slot = futures[future]
+                    try:
+                        apply_mapping(batch, future.result(), preferred_slot)
+                        stats["translation_requests"] += 1
+                    except Exception as exc:  # noqa: BLE001 - retain the row-level error
+                        stats["translation_batch_fallbacks"] += 1
+                        fallback_slot = (preferred_slot + 1) % len(api_keys)
+                        for row in batch:
+                            try:
+                                translated = _translate_batch(
+                                    api_keys[fallback_slot], model_id, [row], max_tokens, timeout
+                                )
+                                apply_mapping([row], translated, fallback_slot)
+                                stats["translation_requests"] += 1
+                            except Exception as fallback_exc:  # noqa: BLE001
+                                row["translation_status"] = "ERROR"
+                                row["translation_error"] = (
+                                    f"{type(exc).__name__}: {exc}; "
+                                    f"fallback {type(fallback_exc).__name__}: {fallback_exc}"
+                                )[:1500]
+                                stats["translation_errors"] += 1
+        return dict(stats)
+
     for offset in range(0, len(pending), batch_size):
         batch = pending[offset : offset + batch_size]
         if time.monotonic() >= deadline:
@@ -1125,14 +1117,7 @@ def _apply_translations(
         try:
             translated, used_slot = translate_with_failover(batch)
             stats["translation_requests"] += 1
-            for row in batch:
-                row["translation_key_slot"] = str(used_slot + 1)
-                mapping = translated.get(row.get("record_id", ""), {})
-                translated_count, missing_count, scored = _apply_translation_mapping(row, mapping)
-                if missing_count:
-                    stats["translation_errors"] += 1
-                stats["translated_abstracts"] += translated_count
-                stats["scored_rows"] += int(scored)
+            apply_mapping(batch, translated, used_slot)
         except Exception as exc:  # noqa: BLE001 - keep the English evidence usable
             # A multi-row response can be empty or exceed the model's output
             # budget even when each row fits. Retry rows separately, then one
@@ -1143,13 +1128,7 @@ def _apply_translations(
                 try:
                     translated, used_slot = translate_with_failover([row])
                     stats["translation_requests"] += 1
-                    row["translation_key_slot"] = str(used_slot + 1)
-                    mapping = translated.get(row.get("record_id", ""), {})
-                    translated_count, missing_count, scored = _apply_translation_mapping(row, mapping)
-                    if missing_count:
-                        stats["translation_errors"] += 1
-                    stats["translated_abstracts"] += translated_count
-                    stats["scored_rows"] += int(scored)
+                    apply_mapping([row], translated, used_slot)
                 except Exception:  # noqa: BLE001 - keep row-level audit trail
                     stats["translation_candidate_fallbacks"] += 1
                     fallback_slot = key_cursor % len(api_keys)
@@ -1618,28 +1597,28 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         claims_prefix = os.getenv("SILVER_CLAIMS_PREFIX", "silver/claims").strip("/")
         evidence_prefix = os.getenv("SILVER_EVIDENCE_PREFIX", "silver/evidence").strip("/")
         rejected_prefix = os.getenv("SILVER_REJECTED_EVIDENCE_PREFIX", "silver/rejected/evidence").strip("/")
-        # A zero max drains every pending claim. PubMed, embedding and
-        # translation calls still stop at the internal deadline, so a large
-        # backlog is written partially and picked up by the next drain.
+        # A zero max processes every eligible claim in the triggering object.
+        # An explicit error row is preferable to silently carrying a record
+        # into a later scheduled run.
         max_rows = _env_int("EVIDENCE_MAX_ROWS", 0, minimum=0, maximum=1000)
         top_k = _env_int("PUBMED_TOP_K", 10, minimum=1, maximum=20)
         request_delay = _env_float("PUBMED_REQUEST_DELAY", 0.4, minimum=0.34)
         request_timeout = _env_float("PUBMED_REQUEST_TIMEOUT", 20.0, minimum=5.0)
-        # A full evidence run includes PubMed, embeddings and Spanish
-        # translations. Keep a safety margin below the 300-second Function
-        # limit, but allow a normal event invocation to finish the candidate
-        # abstracts it has already retrieved.
-        max_seconds = _env_float("EVIDENCE_MAX_SECONDS", 270.0, minimum=30.0)
-        abstract_max_chars = _env_int("ABSTRACT_MAX_CHARS", 3000, minimum=500, maximum=10000)
+        # Use almost all of the 300-second OCI Function window while keeping a
+        # small configurable margin to persist the fully translated CSV.
+        max_seconds = _env_float("EVIDENCE_MAX_SECONDS", 295.0, minimum=30.0)
+        time_buffer = _env_float("EVIDENCE_TIME_BUFFER", 5.0, minimum=1.0)
+        abstract_max_chars = _env_int("ABSTRACT_MAX_CHARS", 1500, minimum=500, maximum=10000)
         translate_enabled = _env_bool("TRANSLATE_ABSTRACTS", True)
         translation_secret_ids = _secret_ids(
             "GOOGLE_TRANSLATION_SECRET_OCIDS",
             "GOOGLE_TRANSLATION_SECRET_OCID",
         )
         translation_model = os.getenv("TRANSLATION_MODEL_ID", "gemini-3.5-flash-lite").strip()
-        translation_batch_size = _env_int("TRANSLATION_BATCH_SIZE", 2, minimum=1, maximum=5)
-        translation_max_tokens = _env_int("TRANSLATION_MAX_TOKENS", 5000, minimum=500, maximum=12000)
+        translation_batch_size = _env_int("TRANSLATION_BATCH_SIZE", 1, minimum=1, maximum=5)
+        translation_max_tokens = _env_int("TRANSLATION_MAX_TOKENS", 8000, minimum=500, maximum=12000)
         translation_timeout = _env_float("TRANSLATION_REQUEST_TIMEOUT", 30.0, minimum=5.0)
+        translation_parallelism = _env_int("TRANSLATION_PARALLELISM", 2, minimum=1, maximum=10)
         embeddings_enabled = _env_bool("EMBEDDINGS_ENABLED", True)
         embedding_model = os.getenv("EMBEDDING_MODEL_ID", "cohere.embed-v4.0").strip()
         embedding_region = os.getenv("EMBEDDING_REGION", "us-ashburn-1").strip()
@@ -1654,18 +1633,10 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         tool = os.getenv("PUBMED_TOOL", "mednews-thesis").strip() or "mednews-thesis"
         email = _required_env("PUBMED_EMAIL")
         api_key = os.getenv("PUBMED_API_KEY", "").strip()
-        deadline = started + max_seconds - 10.0
-
+        if time_buffer >= max_seconds:
+            raise RuntimeError("EVIDENCE_TIME_BUFFER must be smaller than EVIDENCE_MAX_SECONDS")
+        deadline = started + max_seconds - time_buffer
         mode = "retrieve"
-        if data is not None:
-            raw_request = data.read()
-            if raw_request:
-                payload = json.loads(
-                    raw_request.decode("utf-8") if isinstance(raw_request, bytes) else raw_request
-                )
-                mode = str(payload.get("mode", "retrieve")).strip().lower()
-        if mode not in {"retrieve", "translate_existing"}:
-            raise RuntimeError("mode must be either 'retrieve' or 'translate_existing'")
 
         storage = _object_storage_client()
         pubmed_requests = 0
@@ -1691,87 +1662,10 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             if translation_secret_ids and not translation_api_keys:
                 translation_config_error = "No usable translation Gemini Vault secret was found"
 
-        if mode == "retrieve":
-            claim_rows, scan_meta = _latest_claim_rows(storage, namespace, bucket, claims_prefix)
-            existing_ids = _existing_evidence_ids(
-                storage, namespace, bucket, evidence_prefix, rejected_prefix
-            )
-            pending, selection_meta = _select_claims(claim_rows, existing_ids, max_rows)
-            mode = _next_mode_after_claim_selection(mode, pending)
-
-        if mode == "translate_existing":
-            pending, selection_meta = _pending_translation_rows(
-                storage,
-                namespace,
-                bucket,
-                evidence_prefix,
-                max_rows,
-            )
-            scan_meta = {
-                "claims_objects_scanned": 0,
-                "claims_rows_seen": 0,
-                "unique_claims": 0,
-            }
-            output_rows = [
-                {
-                    field: row.get(field, "")
-                    for field in OUTPUT_FIELDS
-                }
-                for row in pending
-            ]
-            translation_stats = _apply_translations(
-                output_rows,
-                translation_api_keys,
-                translation_model,
-                translation_batch_size,
-                translation_max_tokens,
-                translation_timeout,
-                deadline,
-                run_id,
-                translate_enabled,
-                configuration_error=translation_config_error,
-            )
-            status_counts = Counter(row.get("evidence_status", "") for row in output_rows)
-            object_name = ""
-            if output_rows:
-                object_name = _write_evidence(
-                    storage,
-                    namespace,
-                    bucket,
-                    evidence_prefix,
-                    output_rows,
-                    run_id,
-                    object_stem="evidence_translated",
-                )
-            result = {
-                "status": "ok" if not translation_stats.get("translation_errors") else "partial",
-                "mode": mode,
-                "run_id": run_id,
-                "bucket": bucket,
-                "object_name": object_name,
-                "row_count": str(len(output_rows)),
-                "status_counts": dict(status_counts),
-                "pubmed_requests": "0",
-                "translation": translation_stats,
-                "translation_model": translation_model if translate_enabled else "",
-                "translation_key_slots_configured": str(len(translation_api_keys)) if translate_enabled else "0",
-                "top_k": str(top_k),
-                "max_rows": "all" if max_rows == 0 else str(max_rows),
-                "translation_batch_size": str(translation_batch_size),
-                "cosine_method": COSINE_METHOD,
-                "ranking_method": COSINE_METHOD,
-                "embedding_model": embedding_model if embeddings_enabled else "",
-                "embedding_status": "not_used_in_translate_existing",
-                "elapsed_seconds": f"{time.monotonic() - started:.2f}",
-                "scan": scan_meta,
-                "selection": selection_meta,
-            }
-            LOGGER.info("Translated Silver evidence batch written: %s (%s rows)", object_name or "none", len(output_rows))
-            return response.Response(
-                ctx,
-                response_data=json.dumps(result, ensure_ascii=False),
-                headers={"Content-Type": "application/json"},
-            )
+        source_object = _event_object_name(data, bucket, claims_prefix)
+        claim_rows, scan_meta = _event_claim_rows(storage, namespace, bucket, source_object)
+        existing_ids = _existing_evidence_ids(storage, namespace, bucket, evidence_prefix, rejected_prefix)
+        pending, selection_meta = _select_claims(claim_rows, existing_ids, max_rows)
 
         query_pmids: dict[str, list[str]] = {}
         errors: dict[str, str] = {}
@@ -1882,48 +1776,8 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             run_id,
             translate_enabled,
             configuration_error=translation_config_error,
+            parallelism=translation_parallelism,
         )
-
-        # Events invoke this Function for newly created Claims files.  A
-        # previous evidence run can nevertheless have saved valid candidates
-        # whose translations reached the time budget.  Drain that backlog in
-        # the same event invocation when there is enough time for at least one
-        # provider request.  This keeps recovery event-driven rather than
-        # depending on a second, redundant Evidence schedule.
-        deferred_translation_stats: dict[str, Any] = {}
-        deferred_selection_meta: dict[str, int] = {}
-        deferred_object_name = ""
-        remaining_for_deferred = deadline - time.monotonic()
-        if _has_time_for_deferred_translation(remaining_for_deferred, translation_timeout):
-            deferred_rows, deferred_selection_meta = _pending_translation_rows(
-                storage,
-                namespace,
-                bucket,
-                evidence_prefix,
-                max_rows,
-            )
-            if deferred_rows:
-                deferred_translation_stats = _apply_translations(
-                    deferred_rows,
-                    translation_api_keys,
-                    translation_model,
-                    translation_batch_size,
-                    translation_max_tokens,
-                    translation_timeout,
-                    deadline,
-                    run_id,
-                    translate_enabled,
-                    configuration_error=translation_config_error,
-                )
-                deferred_object_name = _write_evidence(
-                    storage,
-                    namespace,
-                    bucket,
-                    evidence_prefix,
-                    deferred_rows,
-                    run_id,
-                    object_stem="evidence_translated",
-                )
         accepted_rows = [row for row in output_rows if row.get("evidence_status", "").upper() == "OK"]
         rejected_rows = [row for row in output_rows if row.get("evidence_status", "").upper() != "OK"]
         for row in rejected_rows:
@@ -1951,21 +1805,20 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "run_id": run_id,
             "bucket": bucket,
             "object_name": object_name,
+            "source_object": source_object,
             "row_count": str(len(accepted_rows)),
             "rejected_object_name": rejected_object_name,
             "rejected_row_count": str(len(rejected_rows)),
             "status_counts": dict(status_counts),
-            "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
+            "rows_left_for_next_run": "0",
             "pubmed_requests": str(pubmed_requests),
             "translation": translation_stats,
-            "deferred_translation": deferred_translation_stats,
-            "deferred_translation_object_name": deferred_object_name,
-            "deferred_translation_selection": deferred_selection_meta,
             "translation_model": translation_model if translate_enabled else "",
             "translation_key_slots_configured": str(len(translation_api_keys)) if translate_enabled else "0",
             "top_k": str(top_k),
             "max_rows": "all" if max_rows == 0 else str(max_rows),
             "translation_batch_size": str(translation_batch_size),
+            "translation_parallelism": str(min(translation_parallelism, len(translation_api_keys))) if translation_api_keys else "0",
             "cosine_method": (
                 EMBEDDING_METHOD
                 if embedding_stats.get("status") == "ok"

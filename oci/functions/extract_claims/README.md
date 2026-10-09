@@ -53,12 +53,14 @@ group must be allowed to read both secrets. The request uses the
 `llm_key_slot` records which loaded slot produced each row without exposing the
 key.
 
-The pending rows are filled across all CSVs in `silver/body/`, in deterministic
-object name order. Record IDs already present in `silver/claims/` are skipped,
-so a second invocation continues with new rows. `LLM_MAX_ROWS=0` means that one
-invocation drains every eligible body it can finish before the internal time
-budget. Set it to a positive value only for a deliberate cap. The legacy
-`LLM_BATCH_SIZE` variable is no longer used as the invocation cap.
+Each OCI Event identifies one `silver/body/*.csv` object. The Function reads
+only that source file, excludes body rows whose extraction was not `OK`, and
+writes its corresponding Claims CSV. Record IDs already present in
+`silver/claims/` are skipped only to make a duplicated delivery of the same
+event idempotent; rows from earlier Body files are never pulled into the run.
+`LLM_MAX_ROWS=0` means process every eligible body from the triggering object.
+Set it to a positive value only for a deliberate cap; a cap smaller than the
+event file is rejected instead of silently spilling rows into another run.
 `LLM_REQUEST_BATCH_SIZE` limits the number of rows sent in one Gemini request;
 the recommended value 10 keeps each prompt bounded while the function sends
 the next request in the same invocation. Eligible rows include
@@ -66,15 +68,14 @@ the next request in the same invocation. Eligible rows include
 English PubMed abstracts without another Gemini request. The Function writes
 successful rows when the internal time budget is reached. If Gemini is
 unavailable, the quota is exhausted, or a response does not contain one valid
-item per input row, that request's rows are not written and remain pending for
-a later retry.
+item per input row, every affected article is written with `llm_status=ERROR`
+and an explicit reason; it does not remain pending for another scheduled run.
 HTTP 4xx, quota, rate-limit, and malformed JSON failures are not retried
 inside the same invocation, so a failed request does not consume a duplicate
 API call.
 
-The current request batch is 10 rows, while the invocation drains all pending
-rows that fit within the 240-second internal budget and 10-second buffer before
-OCI's 300-second synchronous limit. With 50 eligible bodies this means five
+The current request batch is 10 rows. With 50 eligible bodies in the triggering
+file this means five
 Gemini requests, alternating the two configured project keys. The actual time
 is dominated by body length, response tokens and project quota. See
 [`docs/limits_and_timing.md`](../../../docs/limits_and_timing.md) for the
@@ -94,32 +95,13 @@ The output keeps the Bronze and body columns and adds `claim_text`,
 `needs_human_review`, `llm_status`, `llm_error`, `llm_raw_json`, `model_id`,
 `llm_key_slot`, `prompt_version`, timestamps, and source object/run identifiers.
 
-## Enriching existing claim CSVs
-
-CSV objects written before the English fields were added can be migrated
-without downloading the news or extracting bodies again:
-
-```bash
-oci fn function invoke \
-  --function-id <extract-claims-function-ocid> \
-  --file - \
-  --body '{"mode":"enrich_queries"}' \
-  --region us-ashburn-1 \
-  --read-timeout 360
-```
-
-This mode also drains all existing eligible claims by default and writes
-`claims_query_enriched_<run_id>.csv` in the same prefix. Set `LLM_MAX_ROWS` to a
-positive value if the migration must be split deliberately. It is idempotent:
-rows whose `query_status` is already `OK` are not enriched again.
-
 ## Manual invocation
 
 ```bash
 oci fn function invoke \
   --function-id <extract-claims-function-ocid> \
   --file - \
-  --body '' \
+  --body '{"data":{"resourceName":"silver/body/<input>.csv","additionalDetails":{"bucketName":"mednews-data"}}}' \
   --region us-ashburn-1 \
   --read-timeout 360
 ```
