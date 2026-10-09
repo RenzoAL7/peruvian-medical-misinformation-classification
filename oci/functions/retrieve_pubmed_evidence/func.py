@@ -78,6 +78,7 @@ OUTPUT_FIELDS = [
     "translation_run_id",
     "retrieved_at",
 ]
+REJECTED_FIELDS = OUTPUT_FIELDS + ["rejection_reason"]
 
 
 def _required_env(name: str) -> str:
@@ -424,6 +425,7 @@ def _existing_evidence_ids(
     namespace: str,
     bucket: str,
     evidence_prefix: str,
+    rejected_prefix: str = "",
 ) -> set[str]:
     """Return evidence rows that are terminal and should not be retried.
 
@@ -455,11 +457,13 @@ def _existing_evidence_ids(
         return not any(marker in error for marker in transient)
 
     record_ids: set[str] = set()
-    for object_name in _list_csv_objects(client, namespace, bucket, evidence_prefix):
-        for row in _read_csv_object(client, namespace, bucket, object_name):
-            record_id = row.get("record_id", "").strip()
-            if record_id and terminal(row):
-                record_ids.add(record_id)
+    prefixes = [evidence_prefix] + ([rejected_prefix] if rejected_prefix else [])
+    for prefix in prefixes:
+        for object_name in _list_csv_objects(client, namespace, bucket, prefix):
+            for row in _read_csv_object(client, namespace, bucket, object_name):
+                record_id = row.get("record_id", "").strip()
+                if record_id and terminal(row):
+                    record_ids.add(record_id)
     return record_ids
 
 
@@ -1569,6 +1573,40 @@ def _write_evidence(
     return object_name
 
 
+def _write_rejected_evidence(
+    client: Any,
+    namespace: str,
+    bucket: str,
+    prefix: str,
+    rows: list[dict[str, str]],
+    run_id: str,
+) -> str:
+    csv_buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(csv_buffer, fieldnames=REJECTED_FIELDS, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    object_name = f"{prefix.strip('/')}/rejected_evidence_{run_id}.csv"
+    client.put_object(
+        namespace_name=namespace,
+        bucket_name=bucket,
+        object_name=object_name,
+        put_object_body=io.BytesIO(csv_buffer.getvalue().encode("utf-8-sig")),
+        content_type="text/csv; charset=utf-8",
+    )
+    return object_name
+
+
+def _evidence_rejection_reason(row: dict[str, str]) -> str:
+    status = row.get("evidence_status", "").strip().upper()
+    if status == "NO_RESULTS":
+        return "PUBMED_NO_RESULTS"
+    if status == "NO_ABSTRACT":
+        return "PUBMED_RESULTS_WITHOUT_ABSTRACT"
+    if status == "ERROR":
+        return row.get("evidence_error", "") or "EVIDENCE_RETRIEVAL_ERROR"
+    return status or "EVIDENCE_NOT_USABLE"
+
+
 def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
     started = time.monotonic()
     now = datetime.now(timezone.utc)
@@ -1579,6 +1617,7 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
         bucket = _required_env("OBJECT_STORAGE_BUCKET")
         claims_prefix = os.getenv("SILVER_CLAIMS_PREFIX", "silver/claims").strip("/")
         evidence_prefix = os.getenv("SILVER_EVIDENCE_PREFIX", "silver/evidence").strip("/")
+        rejected_prefix = os.getenv("SILVER_REJECTED_EVIDENCE_PREFIX", "silver/rejected/evidence").strip("/")
         # A zero max drains every pending claim. PubMed, embedding and
         # translation calls still stop at the internal deadline, so a large
         # backlog is written partially and picked up by the next drain.
@@ -1654,7 +1693,9 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
 
         if mode == "retrieve":
             claim_rows, scan_meta = _latest_claim_rows(storage, namespace, bucket, claims_prefix)
-            existing_ids = _existing_evidence_ids(storage, namespace, bucket, evidence_prefix)
+            existing_ids = _existing_evidence_ids(
+                storage, namespace, bucket, evidence_prefix, rejected_prefix
+            )
             pending, selection_meta = _select_claims(claim_rows, existing_ids, max_rows)
             mode = _next_mode_after_claim_selection(mode, pending)
 
@@ -1883,16 +1924,25 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
                     run_id,
                     object_stem="evidence_translated",
                 )
+        accepted_rows = [row for row in output_rows if row.get("evidence_status", "").upper() == "OK"]
+        rejected_rows = [row for row in output_rows if row.get("evidence_status", "").upper() != "OK"]
+        for row in rejected_rows:
+            row["rejection_reason"] = _evidence_rejection_reason(row)
         status_counts = Counter(row.get("evidence_status", "") for row in output_rows)
         object_name = ""
-        if output_rows:
+        if accepted_rows:
             object_name = _write_evidence(
                 storage,
                 namespace,
                 bucket,
                 evidence_prefix,
-                output_rows,
+                accepted_rows,
                 run_id,
+            )
+        rejected_object_name = ""
+        if rejected_rows:
+            rejected_object_name = _write_rejected_evidence(
+                storage, namespace, bucket, rejected_prefix, rejected_rows, run_id
             )
 
         result = {
@@ -1901,7 +1951,9 @@ def handler(ctx: Any, data: io.BytesIO | None = None) -> response.Response:
             "run_id": run_id,
             "bucket": bucket,
             "object_name": object_name,
-            "row_count": str(len(output_rows)),
+            "row_count": str(len(accepted_rows)),
+            "rejected_object_name": rejected_object_name,
+            "rejected_row_count": str(len(rejected_rows)),
             "status_counts": dict(status_counts),
             "rows_left_for_next_run": str(max(0, len(pending) - len(output_rows))),
             "pubmed_requests": str(pubmed_requests),
