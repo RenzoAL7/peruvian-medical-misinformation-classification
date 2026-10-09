@@ -46,6 +46,12 @@ def test_deferred_translation_requires_a_safe_provider_window() -> None:
     assert not module._has_time_for_deferred_translation(34.9, 30.0)
 
 
+def test_evidence_rejection_reason_is_explicit() -> None:
+    module = _load_module()
+
+    assert module._evidence_rejection_reason({"evidence_status": "NO_RESULTS"}) == "PUBMED_NO_RESULTS"
+
+
 def test_embedding_ranking_sets_best_pmid_even_before_translation(monkeypatch) -> None:
     module = _load_module()
     row = {

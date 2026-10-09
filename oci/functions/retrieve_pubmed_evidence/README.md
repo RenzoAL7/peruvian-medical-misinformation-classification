@@ -22,6 +22,7 @@ OBJECT_STORAGE_NAMESPACE=idur1kkrru56
 OBJECT_STORAGE_BUCKET=mednews-data
 SILVER_CLAIMS_PREFIX=silver/claims
 SILVER_EVIDENCE_PREFIX=silver/evidence
+SILVER_REJECTED_EVIDENCE_PREFIX=silver/rejected/evidence
 EVIDENCE_MAX_ROWS=0
 PUBMED_TOP_K=10
 PUBMED_EMAIL=<research contact email>
@@ -83,6 +84,11 @@ estimate so a large set of claims does not exceed the model input limit. See
 complete duration, PubMed and Embed 4 limits.
 
 ## Output
+
+`silver/evidence/` now contains only rows with `evidence_status=OK`. Rows that
+do not yield usable PubMed evidence are written under
+`silver/rejected/evidence/` with `rejection_reason` (for example
+`PUBMED_NO_RESULTS`), and remain part of terminal-result deduplication.
 
 ```text
 silver/evidence/evidence_<run_id>.csv
