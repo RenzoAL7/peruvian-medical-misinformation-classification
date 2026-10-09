@@ -9,8 +9,7 @@ automáticamente si una noticia es verdadera o falsa.
 
 Las Functions desplegadas en OCI separan las etapas de datos:
 
-1. `fetch-newsdata` consulta NewsData por países de Latinoamérica, incluye
-   Puerto Rico (`pr`) y escribe lotes deduplicados en `bronze/`.
+1. `fetch-newsdata` consulta NewsData por países de Latinoamérica y escribe lotes deduplicados en `bronze/`.
 2. `extract-news-body` recorre los CSV Bronze en orden, combina archivos para
    formar lotes de hasta 50 filas pendientes y escribe los cuerpos en `silver/`.
 3. `extract-claims` toma solo cuerpos válidos, genera una afirmación candidata
